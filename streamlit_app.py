@@ -593,25 +593,9 @@ with st.sidebar:
         st.markdown("---")
         
         st.markdown("""
-        ### Ver 3.22 (Reboot Guide)
-        * **UI**: **防禦機制優化** - 當被阻擋時，顯示「Reboot App」的圖文教學，引導使用者更換 IP。
-
-        ### Ver 3.21 (Anti-Zero Protection)
-        * **Fix**: **資料保護** - 當下載 0 檔時，保留舊資料，不清空畫面。
-
-        ### Ver 3.20 (Admin & Fixes)
-        * **Fix**: 修復 `UFuncNoLoopError` 程式亂碼。
-        * **New**: 新增後台管理員功能。
-
-        ### Ver 3.19 (Fix Idle Error)
-        * **Fix**: 修復系統閒置後的 RuntimeError。
-
-        ### Ver 3.18 (Stability Fix)
-        * **Fix**: 修正資料下載不全的問題 (Batch Size 50)。
-
-        ### Ver 3.16 (Speed Boost)
-        * **Opt**: 加入本地快取機制。
-        """)
+        ### Ver 0.2 (測試流量壓力)
+        * **UI**: **測試流量**。
+              """)
 
 # 主畫面 - 回測報告
 if st.session_state['backtest_result'] is not None:
