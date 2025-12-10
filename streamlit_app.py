@@ -529,7 +529,7 @@ with st.sidebar:
     
     strategy_mode = st.radio(
         "選擇篩選策略：",
-        ("🛡️ 守護生命線 (反彈/支撐)", "🔥 浴火重生 (假跌破)", "👑 皇冠特選 (多頭排列)")
+        ("🛡️ 尊重生命線 (反彈/支撐)", "🔥 浴火重生 (Da來守住)", "👑 皇冠特選 (多頭排列)")
     )
 
     st.caption("細部條件：")
@@ -541,21 +541,21 @@ with st.sidebar:
     filter_royal = False
     filter_treasure = False
 
-    if strategy_mode == "🛡️ 守護生命線 (反彈/支撐)":
+    if strategy_mode == "🛡️ 尊重生命線 (反彈/支撐)":
         col1, col2 = st.columns(2)
         with col1: filter_trend_up = st.checkbox("生命線向上", value=False)
         with col2: filter_trend_down = st.checkbox("生命線向下", value=False)
         filter_kd = st.checkbox("KD 黃金交叉", value=False)
         filter_vol_double = st.checkbox("出量 (今日 > 昨日x1.5)", value=False)
     
-    elif strategy_mode == "🔥 浴火重生 (假跌破)":
+    elif strategy_mode == "🔥 浴火重生 (Da來守住)":
         filter_treasure = True
         st.info("ℹ️ 尋找：過去7日內曾跌破，但今日站回生命線的個股。")
         filter_vol_double = st.checkbox("出量確認", value=False)
 
     elif strategy_mode == "👑 皇冠特選 (多頭排列)":
         filter_royal = True
-        st.info("ℹ️ 條件：股價 > 20MA > 60MA > 200MA (多頭強勢股)")
+        st.info("ℹ️ 條件：股價 > 30MA > 60MA > 200MA (多頭強勢股)")
         st.markdown("""
         **回測規則 (更嚴格)：**
         * **停利**：20天內任一天觸及 +10%
@@ -571,7 +571,7 @@ with st.sidebar:
         stock_dict = get_stock_list()
         bt_progress = st.progress(0, text="初始化回測...")
         
-        use_treasure_param = True if strategy_mode == "🔥 浴火重生 (假跌破)" else False
+        use_treasure_param = True if strategy_mode == "🔥 浴火重生 (Da來守住)" else False
         use_royal_param = True if strategy_mode == "👑 皇冠特選 (多頭排列)" else False
         
         bt_df = run_strategy_backtest(
@@ -618,7 +618,7 @@ if st.session_state['backtest_result'] is not None:
     bt_df = st.session_state['backtest_result']
     st.markdown("---")
     
-    s_name = "🛡️ 守護生命線"
+    s_name = "🛡️ 尊重生命線"
     if filter_treasure: s_name = "🔥 浴火重生"
     elif filter_royal: s_name = "👑 皇冠特選"
     
@@ -696,16 +696,16 @@ if st.session_state['master_df'] is not None:
     df = df[df['成交量'] >= (min_vol_input * 1000)]
     
     # 策略分流篩選
-    if strategy_mode == "🔥 浴火重生 (假跌破)":
+    if strategy_mode == "🔥 浴火重生 (Da來守住)":
         df = df[df['浴火重生'] == True]
     elif strategy_mode == "👑 皇冠特選 (多頭排列)":
         if '皇冠特選' in df.columns:
             df = df[df['皇冠特選'] == True]
         else:
             # 相容性處理
-            df = df[(df['收盤價'] > df['MA20']) & (df['MA20'] > df['MA60']) & (df['MA60'] > df['生命線'])]
+            df = df[(df['收盤價'] > df['MA15']) & (df['MA15'] > df['MA60']) & (df['MA60'] > df['生命線'])]
     else:
-        # 守護生命線
+        # 尊重生命線
         df = df[df['abs_bias'] <= bias_threshold]
         if filter_trend_up: df = df[df['生命線趨勢'] == "⬆️向上"]
         elif filter_trend_down: df = df[df['生命線趨勢'] == "⬇️向下"]
@@ -732,7 +732,7 @@ if st.session_state['master_df'] is not None:
         
         display_cols = ['代號', '名稱', '收盤價', '生命線', '乖離率(%)', '位置', 'KD值', '成交量(張)']
         if strategy_mode == "👑 皇冠特選 (多頭排列)":
-            display_cols = ['代號', '名稱', '收盤價', 'MA20', 'MA60', '生命線', 'KD值', '成交量(張)']
+            display_cols = ['代號', '名稱', '收盤價', 'MA15', 'MA60', '生命線', 'KD值', '成交量(張)']
             
         df = df.sort_values(by='成交量', ascending=False)
         
