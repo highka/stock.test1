@@ -11,7 +11,7 @@ import csv
 
 # --- 1. 網頁設定 ---
 VER = "ver3.22 (Reboot Guide)"
-st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
+st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
 LOG_FILE = "traffic_log.csv"
@@ -423,7 +423,7 @@ def plot_stock_chart(ticker, name):
     except Exception as e: st.error(f"繪圖失敗: {e}")
 
 # --- 3. 介面顯示區 ---
-st.title(f"🍍 {VER} 旺來-台股生命線")
+st.title(f"✨ {VER} 黑嚕嚕-旗鼓相當")
 st.markdown("---")
 
 if 'master_df' not in st.session_state:
@@ -501,7 +501,7 @@ with st.sidebar:
     
     with st.expander("🔐 管理員後台"):
         admin_pwd = st.text_input("請輸入管理密碼", type="password")
-        if admin_pwd == "admin888": 
+        if admin_pwd == "admin1133": 
             if os.path.exists(LOG_FILE):
                 st.markdown("### 🚦 流量統計 (最近紀錄)")
                 log_df = pd.read_csv(LOG_FILE)
