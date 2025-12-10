@@ -4,3 +4,4 @@ pandas
 twstock
 plotly
 requests
+lxml
