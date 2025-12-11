@@ -395,10 +395,10 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             k_val = float(k_series.iloc[-1])
                             d_val = float(d_series.iloc[-1])
 
-                            # 看最近 20 根
-                            recent_k = k_series.iloc[-20:]
-                            recent_close = stock_df['Close'].iloc[-20:]
-                            recent_open = stock_df['Open'].iloc[-20:]
+                            # 看最近 60 根
+                            recent_k = k_series.iloc[-60:]
+                            recent_close = stock_df['Close'].iloc[-60:]
+                            recent_open = stock_df['Open'].iloc[-60:]
 
                             # 找最後一次 KD < 20
                             last_k_below20_idx = recent_k[recent_k < 20].last_valid_index()
@@ -406,7 +406,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             if last_k_below20_idx is not None:
                                 # 找之後第一次 KD > 20
                                 future_k = recent_k[recent_k.index > last_k_below20_idx]
-                                first_k_above20_idx = future_k[future_k > 20].first_valid_index()
+                                first_k_above20_idx = future_k[future_k >= 20].first_valid_index()
 
                                 if first_k_above20_idx is not None:
                                     price_oversold = recent_close.loc[last_k_below20_idx]
