@@ -10,7 +10,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 0.2 (Reboot Guide)"
+VER = "ver 1.1 (Add Strategy + MA30 + LegKick)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -30,7 +30,7 @@ def get_remote_ip():
 def log_traffic():
     """紀錄使用者訪問"""
     if 'session_id' not in st.session_state:
-        st.session_state['session_id'] = str(uuid.uuid4())[:8] 
+        st.session_state['session_id'] = str(uuid.uuid4())[:8]
         st.session_state['has_logged'] = False
 
     if not st.session_state['has_logged']:
@@ -76,6 +76,7 @@ def get_stock_list():
         return {}
 
 def calculate_kd_values(df, n=9):
+    """回傳最後一筆 K, D（舊版用）"""
     try:
         low_min = df['Low'].rolling(window=n).min()
         high_max = df['High'].rolling(window=n).max()
@@ -88,6 +89,28 @@ def calculate_kd_values(df, n=9):
         return k, d
     except:
         return 50, 50
+
+def calculate_kd_series(df, n=9):
+    """
+    回傳整條 K / D 序列（index 對齊 df.index）
+    df 需要欄位：High / Low / Close
+    """
+    low_min = df['Low'].rolling(window=n).min()
+    high_max = df['High'].rolling(window=n).max()
+    rsv = (df['Close'] - low_min) / (high_max - low_min) * 100
+    rsv = rsv.fillna(50)
+
+    k_list, d_list = [], []
+    k, d = 50, 50
+    for r in rsv:
+        k = (2/3) * k + (1/3) * r
+        d = (2/3) * d + (1/3) * k
+        k_list.append(k)
+        d_list.append(d)
+
+    k_series = pd.Series(k_list, index=df.index)
+    d_series = pd.Series(d_list, index=df.index)
+    return k_series, d_series
 
 # --- 策略回測核心函數 ---
 def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol, use_royal, min_vol_threshold):
@@ -120,7 +143,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
 
                 ma200_df = df_c.rolling(window=200).mean()
                 if use_royal:
-                    ma20_df = df_c.rolling(window=20).mean()
+                    ma30_df = df_c.rolling(window=30).mean()
                     ma60_df = df_c.rolling(window=60).mean()
                 
                 scan_window = df_c.index[-90:] 
@@ -134,7 +157,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                         ma200_series = ma200_df[ticker]
                         
                         if use_royal:
-                            ma20_series = ma20_df[ticker]
+                            ma30_series = ma30_df[ticker]
                             ma60_series = ma60_df[ticker]
                         
                         stock_name = stock_dict.get(ticker, {}).get('name', ticker)
@@ -158,9 +181,9 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                             is_match = False
                             
                             if use_royal:
-                                ma20_val = ma20_series.iloc[idx]
+                                ma30_val = ma30_series.iloc[idx]
                                 ma60_val = ma60_series.iloc[idx]
-                                if (close_p > ma20_val) and (ma20_val > ma60_val) and (ma60_val > ma200_val):
+                                if (close_p > ma30_val) and (ma30_val > ma60_val) and (ma60_val > ma200_val):
                                     is_match = True
                             else:
                                 low_p = l_series.iloc[idx]
@@ -178,9 +201,9 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                                     past_c = recent_c.iloc[:-1]
                                     past_ma = recent_ma.iloc[:-1]
                                     cond_past_down = (past_c < past_ma).any()
-                                    cond_prev_down = recent_c.iloc[-2] <= recent_ma.iloc[-2]
                                     
-                                    if cond_today_up and cond_past_down: is_match = True
+                                    if cond_today_up and cond_past_down: 
+                                        is_match = True
                                 else:
                                     cond_near = (low_p <= ma200_val * 1.03) and (low_p >= ma200_val * 0.90) 
                                     cond_up = (close_p > ma200_val)
@@ -274,7 +297,8 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
     return pd.DataFrame(results)
 
 def fetch_all_data(stock_dict, progress_bar, status_text):
-    if not stock_dict: return pd.DataFrame()
+    if not stock_dict: 
+        return pd.DataFrame()
     
     all_tickers = list(stock_dict.keys())
     
@@ -288,6 +312,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
             data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False)
             if not data.empty:
                 try:
+                    df_o = data['Open']
                     df_c = data['Close']
                     df_h = data['High']
                     df_l = data['Low']
@@ -300,14 +325,15 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                     df_h = df_h.to_frame(name=batch[0])
                     df_l = df_l.to_frame(name=batch[0])
                     df_v = df_v.to_frame(name=batch[0])
+                    df_o = df_o.to_frame(name=batch[0])
 
                 ma200_df = df_c.rolling(window=200).mean()
-                ma20_df = df_c.rolling(window=20).mean()
+                ma30_df = df_c.rolling(window=30).mean()
                 ma60_df = df_c.rolling(window=60).mean()
 
                 last_price_series = df_c.iloc[-1]
                 last_ma200_series = ma200_df.iloc[-1]
-                last_ma20_series = ma20_df.iloc[-1]
+                last_ma30_series = ma30_df.iloc[-1]
                 last_ma60_series = ma60_df.iloc[-1]
                 prev_ma200_series = ma200_df.iloc[-21] 
                 
@@ -321,17 +347,19 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                     try:
                         price = last_price_series[ticker]
                         ma200 = last_ma200_series[ticker]
-                        ma20 = last_ma20_series[ticker]
+                        ma30 = last_ma30_series[ticker]
                         ma60 = last_ma60_series[ticker]
                         prev_ma200 = prev_ma200_series[ticker]
                         
                         vol = last_vol_series[ticker]
                         prev_vol = prev_vol_series[ticker]
                         
-                        if pd.isna(price) or pd.isna(ma200) or ma200 == 0: continue
+                        if pd.isna(price) or pd.isna(ma200) or ma200 == 0: 
+                            continue
 
                         ma_trend = "⬆️向上" if ma200 >= prev_ma200 else "⬇️向下"
 
+                        # 浴火重生判斷（假跌破站回生命線）
                         is_treasure = False
                         my_recent_c = recent_close_df[ticker]
                         my_recent_ma = recent_ma200_df[ticker]
@@ -340,20 +368,78 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             past_c = my_recent_c.iloc[:-1]
                             past_ma = my_recent_ma.iloc[:-1]
                             cond_past_down = (past_c < past_ma).any()
-                            if cond_today_up and cond_past_down: is_treasure = True
+                            if cond_today_up and cond_past_down: 
+                                is_treasure = True
 
+                        # 👑 皇冠特選：股價 > 30MA > 60MA > 200MA
                         is_royal = False
-                        if (price > ma20) and (ma20 > ma60) and (ma60 > ma200):
+                        if (price > ma30) and (ma30 > ma60) and (ma60 > ma200):
                             is_royal = True
 
-                        stock_df = pd.DataFrame({'Close': df_c[ticker], 'High': df_h[ticker], 'Low': df_l[ticker]}).dropna()
+                        # 準備 K 線資料
+                        stock_df = pd.DataFrame({
+                            'Open': df_o[ticker],
+                            'Close': df_c[ticker],
+                            'High': df_h[ticker],
+                            'Low': df_l[ticker]
+                        }).dropna()
+
                         k_val, d_val = 0, 0
-                        if len(stock_df) >= 9:
-                            k_val, d_val = calculate_kd_values(stock_df)
+                        is_leg_kick = False  # 🦵 打腳發動 flag
+
+                        if len(stock_df) >= 20:
+                            # 算整條 KD
+                            k_series, d_series = calculate_kd_series(stock_df)
+
+                            # 最後一筆 KD
+                            k_val = float(k_series.iloc[-1])
+                            d_val = float(d_series.iloc[-1])
+
+                            # 看最近 20 根
+                            recent_k = k_series.iloc[-20:]
+                            recent_close = stock_df['Close'].iloc[-20:]
+                            recent_open = stock_df['Open'].iloc[-20:]
+
+                            # 找最後一次 KD < 20
+                            last_k_below20_idx = recent_k[recent_k < 20].last_valid_index()
+
+                            if last_k_below20_idx is not None:
+                                # 找之後第一次 KD > 20
+                                future_k = recent_k[recent_k.index > last_k_below20_idx]
+                                first_k_above20_idx = future_k[future_k > 20].first_valid_index()
+
+                                if first_k_above20_idx is not None:
+                                    price_oversold = recent_close.loc[last_k_below20_idx]
+                                    price_bounce = recent_close.loc[first_k_above20_idx]
+
+                                    # KD>20 那根的價 > KD<20 那根的價
+                                    if price_bounce > price_oversold:
+                                        # 在完整 stock_df 試著找位置
+                                        full_pos = stock_df.index.get_loc(first_k_above20_idx)
+                                        if full_pos > 0:
+                                            prev_open = stock_df['Open'].iloc[full_pos - 1]
+                                            prev_close = stock_df['Close'].iloc[full_pos - 1]
+                                            curr_open = stock_df['Open'].iloc[full_pos]
+                                            curr_close = stock_df['Close'].iloc[full_pos]
+
+                                            # 前一天黑 K、當天紅 K
+                                            prev_is_black = prev_close < prev_open
+                                            curr_is_red = curr_close > curr_open
+
+                                            # 紅吞：當天實體包住前一天實體
+                                            engulf = (curr_open < prev_close) and (curr_close > prev_open)
+
+                                            if prev_is_black and curr_is_red and engulf:
+                                                is_leg_kick = True
+                        else:
+                            # 資料不足 20 根時退而求其次，只算最後 KD
+                            if len(stock_df) >= 9:
+                                k_val, d_val = calculate_kd_values(stock_df)
 
                         bias = ((price - ma200) / ma200) * 100
                         stock_info = stock_dict.get(ticker)
-                        if not stock_info: continue
+                        if not stock_info: 
+                            continue
 
                         raw_data_list.append({
                             '代號': stock_info['code'],
@@ -361,7 +447,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             '完整代號': ticker,
                             '收盤價': float(price),
                             '生命線': float(ma200),
-                            'MA20': float(ma20),
+                            'MA30': float(ma30),
                             'MA60': float(ma60),
                             '生命線趨勢': ma_trend,
                             '乖離率(%)': float(bias),
@@ -372,14 +458,16 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             'D值': float(d_val),
                             '位置': "🟢生命線上" if price >= ma200 else "🔴生命線下",
                             '浴火重生': is_treasure,
-                            '皇冠特選': is_royal
+                            '皇冠特選': is_royal,
+                            '打腳發動': is_leg_kick
                         })
-                    except: continue
-        except: pass
+                    except:
+                        continue
+        except:
+            pass
         
         current_progress = (i + 1) / total_batches
         progress_bar.progress(current_progress, text=f"系統正在努力挖掘寶藏中...({int(current_progress*100)}%)")
-        
         time.sleep(0.3)
     
     return pd.DataFrame(raw_data_list)
@@ -391,7 +479,8 @@ def plot_stock_chart(ticker, name):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
-        if df.index.tz is not None: df.index = df.index.tz_localize(None)
+        if df.index.tz is not None: 
+            df.index = df.index.tz_localize(None)
         df = df[df['Volume'] > 0].dropna()
         if df.empty:
             st.error("無法取得有效數據")
@@ -420,7 +509,8 @@ def plot_stock_chart(ticker, name):
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
         st.plotly_chart(fig, use_container_width=True)
-    except Exception as e: st.error(f"繪圖失敗: {e}")
+    except Exception as e: 
+        st.error(f"繪圖失敗: {e}")
 
 # --- 3. 介面顯示區 ---
 st.title(f"✨ {VER} 黑嚕嚕-旗鼓相當")
@@ -473,7 +563,6 @@ with st.sidebar:
             
             df = fetch_all_data(stock_dict, progress_bar, status_text)
             
-            # --- Ver 3.21 & 3.22: 阻擋防禦與教學提示 ---
             if not df.empty:
                 df.to_csv(CACHE_FILE, index=False)
                 st.session_state['master_df'] = df
@@ -481,8 +570,6 @@ with st.sidebar:
                 st.success(f"更新完成！共 {len(df)} 檔資料")
             else:
                 st.error("⛔ 由於申請次數過多，連線資料庫阻擋。")
-                
-                # --- Ver 3.22: 新增 REBOOT APP 教學 ---
                 with st.expander("🆘 嘗試解決方案：Reboot App (點我展開)"):
                     st.info("""
                     **請嘗試「重啟應用程式」來更換連線環境：**
@@ -529,7 +616,12 @@ with st.sidebar:
     
     strategy_mode = st.radio(
         "選擇篩選策略：",
-        ("🛡️ 尊重生命線 (反彈/支撐)", "🔥 浴火重生 (Da來守住)", "👑 皇冠特選 (多頭排列)")
+        (
+            "🛡️ 尊重生命線 (反彈/支撐)",
+            "🔥 浴火重生 (Da來守住)",
+            "👑 皇冠特選 (多頭排列)",
+            "🦵 打腳發動 (KD+紅吞)"
+        )
     )
 
     st.caption("細部條件：")
@@ -543,8 +635,10 @@ with st.sidebar:
 
     if strategy_mode == "🛡️ 尊重生命線 (反彈/支撐)":
         col1, col2 = st.columns(2)
-        with col1: filter_trend_up = st.checkbox("生命線向上", value=False)
-        with col2: filter_trend_down = st.checkbox("生命線向下", value=False)
+        with col1: 
+            filter_trend_up = st.checkbox("生命線向上", value=False)
+        with col2: 
+            filter_trend_down = st.checkbox("生命線向下", value=False)
         filter_kd = st.checkbox("KD 黃金交叉", value=False)
         filter_vol_double = st.checkbox("出量 (今日 > 昨日x1.5)", value=False)
     
@@ -563,39 +657,47 @@ with st.sidebar:
         """)
         filter_vol_double = st.checkbox("出量確認", value=False)
 
+    elif strategy_mode == "🦵 打腳發動 (KD+紅吞)":
+        st.info("條件：前一次 KD<20，之後 KD>20，KD>20 當日收盤價高於前低，且當天為紅吞黑 K 線。")
+
     st.divider()
     
     st.caption("⚠️ 回測將使用上方設定的「最低成交量」進行過濾。")
     if st.button("🧪 策略回測"):
-        st.info("阿吉正在調閱過去2年的歷史檔案，進行深度驗證... (請稍候) ⏳")
-        stock_dict = get_stock_list()
-        bt_progress = st.progress(0, text="初始化回測...")
-        
-        use_treasure_param = True if strategy_mode == "🔥 浴火重生 (Da來守住)" else False
-        use_royal_param = True if strategy_mode == "👑 皇冠特選 (多頭排列)" else False
-        
-        bt_df = run_strategy_backtest(
-            stock_dict, 
-            bt_progress, 
-            use_trend_up=filter_trend_up, 
-            use_treasure=use_treasure_param, 
-            use_vol=filter_vol_double,
-            use_royal=use_royal_param,
-            min_vol_threshold=min_vol_input 
-        )
-        
-        st.session_state['backtest_result'] = bt_df
-        bt_progress.empty()
-        st.success("回測完成！請查看下方結果。")
+        if strategy_mode == "🦵 打腳發動 (KD+紅吞)":
+            st.warning("『打腳發動』策略目前僅支援即時篩選，尚未開放回測。")
+        else:
+            st.info("阿吉正在調閱過去2年的歷史檔案，進行深度驗證... (請稍候) ⏳")
+            stock_dict = get_stock_list()
+            bt_progress = st.progress(0, text="初始化回測...")
+            
+            use_treasure_param = True if strategy_mode == "🔥 浴火重生 (Da來守住)" else False
+            use_royal_param = True if strategy_mode == "👑 皇冠特選 (多頭排列)" else False
+            
+            bt_df = run_strategy_backtest(
+                stock_dict, 
+                bt_progress, 
+                use_trend_up=filter_trend_up, 
+                use_treasure=use_treasure_param, 
+                use_vol=filter_vol_double,
+                use_royal=use_royal_param,
+                min_vol_threshold=min_vol_input 
+            )
+            
+            st.session_state['backtest_result'] = bt_df
+            bt_progress.empty()
+            st.success("回測完成！請查看下方結果。")
 
     with st.expander("📅 系統開發日誌"):
         st.write(f"**🕒 系統最後重啟時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         st.markdown("---")
         
         st.markdown("""
-        ### Ver 0.2 (測試流量壓力)
-        * **UI**: **測試流量**。
-              """)
+        ### Ver 1.1
+        * 新增策略：🦵 打腳發動 (KD<20 → KD>20 + 紅吞)
+        * 皇冠策略改用：股價 > 30MA > 60MA > 200MA
+        * 保留原先尊重生命線 / 浴火重生邏輯
+        """)
 
 # 主畫面 - 回測報告
 if st.session_state['backtest_result'] is not None:
@@ -603,20 +705,43 @@ if st.session_state['backtest_result'] is not None:
     st.markdown("---")
     
     s_name = "🛡️ 尊重生命線"
-    if filter_treasure: s_name = "🔥 浴火重生"
-    elif filter_royal: s_name = "👑 皇冠特選"
-    
+    if '結果' in bt_df.columns:
+        if (bt_df['結果'] == "驗證成功 🏆").any() or (bt_df['結果'].str.contains("Win").any()):
+            pass
+
+    if '結果' in bt_df.columns:
+        if '🔥 浴火重生' in bt_df['結果'].astype(str).values:
+            s_name = "🔥 浴火重生"
+    if '結果' in bt_df.columns:
+        # 這裡只是名稱顯示，實際策略由上方按鈕決定
+        pass
+
+    if '策略' in bt_df.columns:
+        # 若你未來在回測結果加上「策略欄位」可以用這裡去調整
+        pass
+
+    # 簡單用 sidebar 選項來判斷名稱即可
+    if 'strategy_mode' in locals():
+        if strategy_mode == "🔥 浴火重生 (Da來守住)":
+            s_name = "🔥 浴火重生"
+        elif strategy_mode == "👑 皇冠特選 (多頭排列)":
+            s_name = "👑 皇冠特選"
+
     st.subheader(f"🧪 策略回測報告：{s_name}")
 
-    df_history = bt_df[bt_df['結果'] != "觀察中"].copy()
-    df_watching = bt_df[bt_df['結果'] == "觀察中"].copy()
-    
+    if '結果' in bt_df.columns:
+        df_history = bt_df[bt_df['結果'] != "觀察中"].copy()
+        df_watching = bt_df[bt_df['結果'] == "觀察中"].copy()
+    else:
+        df_history = bt_df.copy()
+        df_watching = bt_df.iloc[0:0]
+
     # 1. 關注中
     if not df_watching.empty:
         st.markdown(f"""
         <div style="background-color: #fff8dc; padding: 15px; border-radius: 10px; border: 2px solid #ffa500; margin-bottom: 20px;">
             <h3 style="color: #d2691e; margin:0;">👀 旺來關注中 (進行中訊號)</h3>
-            <p style="color: #666; margin:5px 0 0 0;">{'這些股票尚未觸發停利(+10%)或停損(破線)。' if filter_royal else '這些股票訊號發生未滿 10 天。'}</p>
+            <p style="color: #666; margin:5px 0 0 0;">{'這些股票尚未觸發停利(+10%)或停損(破線)。'}</p>
         </div>
         """, unsafe_allow_html=True)
         
@@ -632,12 +757,12 @@ if st.session_state['backtest_result'] is not None:
     st.markdown("### 📜 歷史驗證數據 (已結算)")
 
     # 2. 歷史數據
-    if len(df_history) > 0:
+    if len(df_history) > 0 and '月份' in df_history.columns:
         months = sorted(df_history['月份'].unique())
         tabs = st.tabs(["📊 總覽"] + months)
         
         with tabs[0]:
-            win_df = df_history[df_history['結果'].str.contains("Win") | df_history['結果'].str.contains("驗證成功")]
+            win_df = df_history[df_history['結果'].astype(str).str.contains("Win") | df_history['結果'].astype(str).str.contains("驗證成功")]
             win_count = len(win_df)
             total_count = len(df_history)
             win_rate = int((win_count / total_count) * 100) if total_count > 0 else 0
@@ -652,7 +777,7 @@ if st.session_state['backtest_result'] is not None:
         for i, m in enumerate(months):
             with tabs[i+1]:
                 m_df = df_history[df_history['月份'] == m]
-                m_win = len(m_df[m_df['結果'].str.contains("Win") | m_df['結果'].str.contains("驗證成功")])
+                m_win = len(m_df[m_df['結果'].astype(str).str.contains("Win") | m_df['結果'].astype(str).str.contains("驗證成功")])
                 m_total = len(m_df)
                 m_rate = int((m_win / m_total) * 100) if m_total > 0 else 0
                 m_avg = round(m_df['最高漲幅(%)'].mean(), 2) if m_total > 0 else 0
@@ -662,7 +787,8 @@ if st.session_state['backtest_result'] is not None:
                 c2.metric(f"{m} 獲利機率", f"{m_rate}%")
                 c3.metric(f"{m} 平均損益", f"{m_avg}%")
                 
-                def color_ret(val): return f'color: {"red" if val > 0 else "green"}'
+                def color_ret(val): 
+                    return f'color: {"red" if val > 0 else "green"}'
                 st.dataframe(m_df.style.map(color_ret, subset=['最高漲幅(%)']), use_container_width=True)
     else:
         st.warning("在此回測期間內，沒有歷史股票符合條件。")
@@ -682,18 +808,29 @@ if st.session_state['master_df'] is not None:
     # 策略分流篩選
     if strategy_mode == "🔥 浴火重生 (Da來守住)":
         df = df[df['浴火重生'] == True]
+
     elif strategy_mode == "👑 皇冠特選 (多頭排列)":
         if '皇冠特選' in df.columns:
             df = df[df['皇冠特選'] == True]
         else:
-            # 相容性處理
-            df = df[(df['收盤價'] > df['MA15']) & (df['MA15'] > df['MA60']) & (df['MA60'] > df['生命線'])]
+            df = df[(df['收盤價'] > df['MA30']) & (df['MA30'] > df['MA60']) & (df['MA60'] > df['生命線'])]
+
+    elif strategy_mode == "🦵 打腳發動 (KD+紅吞)":
+        if '打腳發動' in df.columns:
+            df = df[df['打腳發動'] == True]
+        else:
+            st.warning("目前資料尚未計算『打腳發動』欄位，請先重新下載最新股價。")
+            df = df.iloc[0:0]
+
     else:
-        # 尊重生命線
+        # 🛡️ 尊重生命線
         df = df[df['abs_bias'] <= bias_threshold]
-        if filter_trend_up: df = df[df['生命線趨勢'] == "⬆️向上"]
-        elif filter_trend_down: df = df[df['生命線趨勢'] == "⬇️向下"]
-        if filter_kd: df = df[df['K值'] > df['D值']]
+        if filter_trend_up: 
+            df = df[df['生命線趨勢'] == "⬆️向上"]
+        elif filter_trend_down: 
+            df = df[df['生命線趨勢'] == "⬇️向下"]
+        if filter_kd: 
+            df = df[df['K值'] > df['D值']]
     
     if filter_vol_double: 
         df = df[df['成交量'] > (df['昨日成交量'] * 1.5)]
@@ -703,7 +840,7 @@ if st.session_state['master_df'] is not None:
     else:
         st.markdown(f"""
         <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #ff4b4b;">
-            <h2 style="color: #333; margin:0;">🔍 根據【{strategy_mode}】，共篩選出 <span style="color: #ff4b4b; font-size: 1.5em;">{len(df)}</span> 檔股票</h2>
+            <h2 style="color: #333; margin:0;">🔍 根據，共篩選出 <span style="color: #ff4b4b; font-size: 1.5em;">{len(df)}</span> 檔股票</h2>
         </div>
         <br>
         """, unsafe_allow_html=True)
@@ -711,12 +848,11 @@ if st.session_state['master_df'] is not None:
         df['成交量(張)'] = (df['成交量'] / 1000).astype(int)
         df['KD值'] = df.apply(lambda x: f"K:{int(x['K值'])} D:{int(x['D值'])}", axis=1)
         
-        # [歷史修復] Ver 3.20: 強制將代號與名稱轉為字串
         df['選股標籤'] = df['代號'].astype(str) + " " + df['名稱'].astype(str)
         
         display_cols = ['代號', '名稱', '收盤價', '生命線', '乖離率(%)', '位置', 'KD值', '成交量(張)']
         if strategy_mode == "👑 皇冠特選 (多頭排列)":
-            display_cols = ['代號', '名稱', '收盤價', 'MA15', 'MA60', '生命線', 'KD值', '成交量(張)']
+            display_cols = ['代號', '名稱', '收盤價', 'MA30', 'MA60', '生命線', 'KD值', '成交量(張)']
             
         df = df.sort_values(by='成交量', ascending=False)
         
@@ -724,7 +860,7 @@ if st.session_state['master_df'] is not None:
         
         with tab1:
             def highlight_row(row):
-                return ['background-color: #e6fffa; color: black'] * len(row) if row['收盤價'] > row['生命線'] else ['background-color: #fff0f0; color: black'] * len(row)
+                return ['背景色: #e6fffa; color: black'] * len(row) if row['收盤價'] > row['生命線'] else ['background-color: #fff0f0; color: black'] * len(row)
 
             st.dataframe(df[display_cols].style.apply(highlight_row, axis=1), use_container_width=True, hide_index=True)
 
@@ -736,7 +872,6 @@ if st.session_state['master_df'] is not None:
                 plot_stock_chart(selected_row['完整代號'], selected_row['名稱'])
                 
                 c1, c2, c3 = st.columns(3)
-                # 這裡幫您把小數點修整為兩位
                 c1.metric("收盤價", f"{selected_row['收盤價']:.2f}")
                 c2.metric("成交量", f"{selected_row['成交量(張)']} 張")
                 c3.metric("KD", selected_row['KD值'])
@@ -750,6 +885,7 @@ else:
             st.markdown("""<div style="text-align: center; font-size: 1.1em; margin-bottom: 20px;">
                 這是數年來的經驗收納<br>此工具僅供參考，不代表投資建議<br>預祝心想事成，從從容容，紫氣東來! 🟣✨</div>""", unsafe_allow_html=True)
             sub_c1, sub_c2, sub_c3 = st.columns([1, 1, 1])
-            with sub_c2: st.image("welcome.jpg", width=180)
+            with sub_c2: 
+                st.image("welcome.jpg", width=180)
         else:
             st.info("💡 尚未偵測到 welcome.jpg")
