@@ -92,8 +92,8 @@ def calculate_kd_values(df, n=9):
 
 def calculate_kd_series(df, n=9):
     """
-    回傳整條 K / D 序列（index 對齊 df.index）
-    df 需要欄位：High / Low / Close
+    回傳整條 K / D 序列，用於打腳策略掃描
+    df 需要至少包含 'High','Low','Close'
     """
     low_min = df['Low'].rolling(window=n).min()
     high_max = df['High'].rolling(window=n).max()
@@ -112,6 +112,65 @@ def calculate_kd_series(df, n=9):
     d_series = pd.Series(d_list, index=df.index)
     return k_series, d_series
 
+
+def detect_leg_kick_signal(stock_df, k_series, lookback=60):
+    """
+    打腳發動條件：
+    1. 在最近 lookback 根內，找到「最後一次 KD < 20」的 t1
+    2. 在 t1 之後，往後找「第一根同時滿足」
+       - KD >= 20
+       - 收盤價 > t1 那天收盤價
+       - 紅吞黑（當天紅K吞掉前一根黑K）
+       的那一根 t2
+    3. 若找到，回傳 (True, t2 日期)；否則回傳 (False, None)
+    """
+    if len(stock_df) < lookback + 2:
+        return False, None
+
+    # 最近 60 根資料
+    recent_df = stock_df.tail(lookback).copy()
+    recent_k = k_series.reindex(recent_df.index)
+
+    # 1. 找最近一次 KD < 20 的日期 t1
+    last_k_below20_idx = recent_k[recent_k < 20].last_valid_index()
+    if last_k_below20_idx is None:
+        return False, None
+
+    oversold_close = recent_df.loc[last_k_below20_idx, 'Close']
+
+    # 2. 從 t1 之後開始，一根一根檢查
+    future_index = [idx for idx in recent_k.index if idx > last_k_below20_idx]
+
+    for dt in future_index:
+        k_val = recent_k.loc[dt]
+
+        # ★ 這裡是你指定的 KD >= 20
+        if k_val < 20:
+            continue
+
+        # 這一天在 recent_df 中的位置
+        pos = recent_df.index.get_loc(dt)
+        if pos == 0:
+            continue  # 沒有前一根，不能紅吞黑
+
+        prev_row = recent_df.iloc[pos - 1]
+        curr_row = recent_df.iloc[pos]
+
+        prev_open, prev_close = prev_row['Open'], prev_row['Close']
+        curr_open, curr_close = curr_row['Open'], curr_row['Close']
+
+        # 前一根黑 K，當天紅 K
+        prev_is_black = prev_close < prev_open
+        curr_is_red = curr_close > curr_open
+
+        # 紅 K 完全吞掉前一根黑 K 的實體（紅吞黑）
+        engulf = (curr_open < prev_close) and (curr_close > prev_open)
+
+        # 價格必須比 t1 那天收盤價更高
+        if prev_is_black and curr_is_red and engulf and (curr_close > oversold_close):
+            return True, dt
+
+    return False, None
 # --- 策略回測核心函數 ---
 def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol, use_royal, min_vol_threshold):
     results = []
