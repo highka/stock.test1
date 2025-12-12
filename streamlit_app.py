@@ -115,43 +115,42 @@ def calculate_kd_series(df, n=9):
 
 def detect_leg_kick_signal(stock_df, k_series, lookback=60):
     """
-    打腳發動條件：
-    1. 在最近 lookback 根內，找到「最後一次 KD < 20」的 t1
-    2. 在 t1 之後，往後找「第一根同時滿足」
-       - KD >= 20
-       - 收盤價 > t1 那天收盤價
-       - 紅吞黑（當天紅K吞掉前一根黑K）
-       的那一根 t2
-    3. 若找到，回傳 (True, t2 日期)；否則回傳 (False, None)
+   打腳發動（新版）：
+    1) 最近 lookback 根內，找到「最後一次 K < 20」的 t1
+    2) t1 之後：只要『任一天』同時符合
+       - K >= 20
+       - 收盤價 > t1 收盤價
+       - 紅吞黑（當天紅K吞掉前一根黑K的實體）
+       就觸發
+    3) 回傳 (True, 觸發日)；否則 (False, None)
     """
     if len(stock_df) < lookback + 2:
         return False, None
 
-    # 最近 lookback 根資料
+    # 最近 lookback 根
     recent_df = stock_df.tail(lookback).copy()
     recent_k = k_series.reindex(recent_df.index)
 
-    # 1. 找最近一次 KD < 20 的日期 t1
-    last_k_below20_idx = recent_k[recent_k < 20].last_valid_index()
-    if last_k_below20_idx is None:
+    # 1) 找最後一次 K < 20 的 t1
+    t1 = recent_k[recent_k < 20].last_valid_index()
+    if t1 is None:
         return False, None
 
-    oversold_close = recent_df.loc[last_k_below20_idx, 'Close']
+    oversold_close = recent_df.loc[t1, 'Close']
 
-    # 2. 從 t1 之後開始，一根一根檢查
-    future_index = [idx for idx in recent_k.index if idx > last_k_below20_idx]
+    # 2) t1 之後任一天：K>=20 且紅吞黑 且收盤>t1收盤
+    future_index = [idx for idx in recent_df.index if idx > t1]
 
     for dt in future_index:
         k_val = recent_k.loc[dt]
 
-        # KD >= 20 才算反彈
-        if k_val < 20:
+        # K >= 20
+        if pd.isna(k_val) or k_val < 20:
             continue
 
-        # 這一天在 recent_df 中的位置
         pos = recent_df.index.get_loc(dt)
         if pos == 0:
-            continue  # 沒有前一根，不能紅吞黑
+            continue  # 沒有前一根不能判斷紅吞黑
 
         prev_row = recent_df.iloc[pos - 1]
         curr_row = recent_df.iloc[pos]
@@ -159,14 +158,13 @@ def detect_leg_kick_signal(stock_df, k_series, lookback=60):
         prev_open, prev_close = prev_row['Open'], prev_row['Close']
         curr_open, curr_close = curr_row['Open'], curr_row['Close']
 
-        # 前一根黑 K，當天紅 K
         prev_is_black = prev_close < prev_open
         curr_is_red = curr_close > curr_open
 
-        # 紅 K 完全吞掉前一根黑 K 的實體（紅吞黑）
+        # 紅吞黑：當天紅K實體完全包住前一天黑K實體
         engulf = (curr_open < prev_close) and (curr_close > prev_open)
 
-        # 價格必須比 t1 那天收盤價更高
+        # 價格必須比 t1 收盤高
         if prev_is_black and curr_is_red and engulf and (curr_close > oversold_close):
             return True, dt
 
@@ -660,10 +658,10 @@ with st.sidebar:
     strategy_mode = st.radio(
         "選擇篩選策略：",
         (
-            "🛡️ 尊重生命線 (反彈/支撐)",
-            "🔥 浴火重生 (Da來守住)",
-            "👑 皇冠特選 (多頭排列)",
-            "🦵 打腳發動 (KD+紅吞)"
+            "🛡️ 生命線保衛戰 ",
+            "🔥 起死回生 ",
+            "👑 多頭馬車發動 ",
+            "🦵 打腳發動 "
         )
     )
 
@@ -676,7 +674,7 @@ with st.sidebar:
     filter_royal = False
     filter_treasure = False
 
-    if strategy_mode == "🛡️ 尊重生命線 (反彈/支撐)":
+    if strategy_mode == "🛡️ 生命線保衛戰":
         col1, col2 = st.columns(2)
         with col1: 
             filter_trend_up = st.checkbox("生命線向上", value=False)
@@ -685,12 +683,12 @@ with st.sidebar:
         filter_kd = st.checkbox("KD 黃金交叉", value=False)
         filter_vol_double = st.checkbox("出量 (今日 > 昨日x1.5)", value=False)
     
-    elif strategy_mode == "🔥 浴火重生 (Da來守住)":
+    elif strategy_mode == "🔥 起死回生":
         filter_treasure = True
         st.info("ℹ️ 尋找：過去7日內曾跌破，但今日站回生命線的個股。")
         filter_vol_double = st.checkbox("出量確認", value=False)
 
-    elif strategy_mode == "👑 皇冠特選 (多頭排列)":
+    elif strategy_mode == "🐎 多頭馬車發動":
         filter_royal = True
         st.info("ℹ️ 條件：股價 > 30MA > 60MA > 200MA (多頭強勢股)")
         st.markdown("""
@@ -714,8 +712,8 @@ with st.sidebar:
             stock_dict = get_stock_list()
             bt_progress = st.progress(0, text="初始化回測...")
             
-            use_treasure_param = True if strategy_mode == "🔥 浴火重生 (Da來守住)" else False
-            use_royal_param = True if strategy_mode == "👑 皇冠特選 (多頭排列)" else False
+            use_treasure_param = True if strategy_mode == "🔥 起死回生" else False
+            use_royal_param = True if strategy_mode == "🐎 多頭馬車發動" else False
             
             bt_df = run_strategy_backtest(
                 stock_dict, 
@@ -736,6 +734,9 @@ with st.sidebar:
         st.markdown("---")
         
         st.markdown("""
+        ### Ver 1.2
+         * 修正打腳發動策略
+         * 修改名詞解釋
         ### Ver 1.1
         * 新增策略：🦵 打腳發動 (KD<20 → KD>=20 + 紅吞)
         * 皇冠策略改用：股價 > 30MA > 60MA > 200MA
@@ -748,12 +749,12 @@ if st.session_state['backtest_result'] is not None:
     st.markdown("---")
     
     # 直接用 sidebar 的選項作為名稱
-    s_name = "🛡️ 尊重生命線"
+    s_name = "🛡️ 生命線保衛戰"
     if 'strategy_mode' in locals():
-        if strategy_mode == "🔥 浴火重生 (Da來守住)":
-            s_name = "🔥 浴火重生"
-        elif strategy_mode == "👑 皇冠特選 (多頭排列)":
-            s_name = "👑 皇冠特選"
+        if strategy_mode == "🔥 起死回生":
+            s_name = "🔥 起死回生"
+        elif strategy_mode == "🐎 多頭馬車發動":
+            s_name = "🐎 多頭馬車發動"
 
     st.subheader(f"🧪 策略回測報告：{s_name}")
 
@@ -768,7 +769,7 @@ if st.session_state['backtest_result'] is not None:
     if not df_watching.empty:
         st.markdown("""
         <div style="background-color: #fff8dc; padding: 15px; border-radius: 10px; border: 2px solid #ffa500; margin-bottom: 20px;">
-            <h3 style="color: #d2691e; margin:0;">👀 旺來關注中 (進行中訊號)</h3>
+            <h3 style="color: #d2691e; margin:0;">👀 關注中 (進行中訊號)</h3>
             <p style="color: #666; margin:5px 0 0 0;">這些股票尚未觸發停利(+10%)或停損(破線)。</p>
         </div>
         """, unsafe_allow_html=True)
@@ -834,12 +835,12 @@ if st.session_state['master_df'] is not None:
     df = df[df['成交量'] >= (min_vol_input * 1000)]
     
     # 策略分流篩選
-    if strategy_mode == "🔥 浴火重生 (Da來守住)":
-        df = df[df['浴火重生'] == True]
+    if strategy_mode == "🔥 起死回生":
+        df = df[df['起死回生'] == True]
 
-    elif strategy_mode == "👑 皇冠特選 (多頭排列)":
+    elif strategy_mode == "🐎 多頭馬車發動":
         if '皇冠特選' in df.columns:
-            df = df[df['皇冠特選'] == True]
+            df = df[df['多頭馬車發動'] == True]
         else:
             df = df[(df['收盤價'] > df['MA30']) & (df['MA30'] > df['MA60']) & (df['MA60'] > df['生命線'])]
 
@@ -851,7 +852,7 @@ if st.session_state['master_df'] is not None:
             df = df.iloc[0:0]
 
     else:
-        # 🛡️ 尊重生命線
+        # 🛡️ 生命線保衛戰
         df = df[df['abs_bias'] <= bias_threshold]
         if filter_trend_up: 
             df = df[df['生命線趨勢'] == "⬆️向上"]
@@ -879,7 +880,7 @@ if st.session_state['master_df'] is not None:
         df['選股標籤'] = df['代號'].astype(str) + " " + df['名稱'].astype(str)
         
         display_cols = ['代號', '名稱', '收盤價', '生命線', '乖離率(%)', '位置', 'KD值', '成交量(張)']
-        if strategy_mode == "👑 皇冠特選 (多頭排列)":
+        if strategy_mode == "🐎 多頭馬車發動)":
             display_cols = ['代號', '名稱', '收盤價', 'MA30', 'MA60', '生命線', 'KD值', '成交量(張)']
             
         df = df.sort_values(by='成交量', ascending=False)
