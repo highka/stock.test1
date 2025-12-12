@@ -10,7 +10,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 1.1 (Add Strategy + MA30 + LegKick)"
+VER = "ver 1.2 (Add Strategy + MA30 + LegKick)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
