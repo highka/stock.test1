@@ -920,6 +920,6 @@ else:
             )
             sub_c1, sub_c2, sub_c3 = st.columns([1, 1, 1])
             with sub_c2:
-                st.image("welcome.jpg", width=180)
+                st.image("welcome.jpg", use_container_width=True)
         else:
             st.info("💡 尚未偵測到 welcome.jpg")
