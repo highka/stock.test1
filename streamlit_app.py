@@ -749,7 +749,7 @@ with st.sidebar:
        bt_progress.empty()
        st.success("回測完成！請查看下方結果。")
   
-        else:
+    else:
             st.info("阿吉正在調閱過去2年的歷史檔案，進行深度驗證... (請稍候) ⏳")
             stock_dict = get_stock_list()
             bt_progress = st.progress(0, text="初始化回測...")
