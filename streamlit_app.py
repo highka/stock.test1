@@ -727,28 +727,28 @@ with st.sidebar:
 
     st.caption("⚠️ 回測將使用上方設定的「最低成交量」進行過濾。")
     if st.button("🧪 策略回測"):
-    st.info("阿吉正在調閱過去2年的歷史檔案，進行深度驗證... (請稍候) ⏳")
+       st.info("阿吉正在調閱過去2年的歷史檔案，進行深度驗證... (請稍候) ⏳")
 
-    stock_dict = get_stock_list()
-    bt_progress = st.progress(0, text="初始化回測...")
+       stock_dict = get_stock_list()
+       bt_progress = st.progress(0, text="初始化回測...")
 
-    use_treasure_param = strategy_mode == "🔥 起死回生 (Da來守住)"
-    use_royal_param = strategy_mode == "🐎 多頭馬車發動 (多頭排列)"
+       use_treasure_param = strategy_mode == "🔥 起死回生 (Da來守住)"
+       use_royal_param = strategy_mode == "🐎 多頭馬車發動 (多頭排列)"
+   
+       bt_df = run_strategy_backtest(
+           stock_dict,
+           bt_progress,
+           use_trend_up=filter_trend_up,
+           use_treasure=use_treasure_param,
+           use_vol=filter_vol_double,
+           use_royal=use_royal_param,
+           min_vol_threshold=min_vol_input,
+      )
 
-    bt_df = run_strategy_backtest(
-        stock_dict,
-        bt_progress,
-        use_trend_up=filter_trend_up,
-        use_treasure=use_treasure_param,
-        use_vol=filter_vol_double,
-        use_royal=use_royal_param,
-        min_vol_threshold=min_vol_input,
-    )
-
-    st.session_state["backtest_result"] = bt_df
-    bt_progress.empty()
-    st.success("回測完成！請查看下方結果。")
-
+       st.session_state["backtest_result"] = bt_df
+       bt_progress.empty()
+       st.success("回測完成！請查看下方結果。")
+  
         else:
             st.info("阿吉正在調閱過去2年的歷史檔案，進行深度驗證... (請稍候) ⏳")
             stock_dict = get_stock_list()
