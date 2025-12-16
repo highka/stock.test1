@@ -112,57 +112,72 @@ def calculate_kd_series(df, n=9):
     d_series = pd.Series(d_list, index=df.index)
     return k_series, d_series
 
-def detect_leg_kick_signal(stock_df, k_series, lookback=60):
+def detect_leg_kick_signal(
+    stock_df,
+    k_series,
+    d_series,
+    lookback=60,
+    kd20_days=3,
+    trigger_days=5
+):
     """
-    ✅ 打腳發動 (你指定的新版本)：
-    1) 最近 lookback 根內，找「最後一次 KD < 20」的 t1
-    2) 在 t1 之後，找「第一次 KD >= 20」的 t_cross
-    3) 從 t_cross（含）之後開始，任一天只要出現「紅吞黑」
-       且當天收盤價 > t1 那天收盤價（價格要比前次 KD<20 高）
-       就觸發
-    4) 找到就回傳 (True, 觸發日期)，否則 (False, None)
+    🦵 打腳發動（最終整合版）
+
+    1. 最近 lookback 根內，最後一次 K < 20
+    2. 之後出現 KD 金叉
+    3. 金叉後 kd20_days 內，K>=20 且 D>=20
+    4. 之後 trigger_days 內，任一天出現：
+       - 紅吞黑
+       - 收盤價 > 前一次 K<20 的收盤價
     """
+
     if len(stock_df) < lookback + 2:
         return False, None
 
-    recent_df = stock_df.tail(lookback).copy()
-    recent_k = k_series.reindex(recent_df.index)
+    df = stock_df.tail(lookback).copy()
+    k = k_series.reindex(df.index)
+    d = d_series.reindex(df.index)
 
-    # 1) 找最後一次 KD < 20 的日期 t1
-    t1 = recent_k[recent_k < 20].last_valid_index()
+    # 1️⃣ 最後一次 K < 20
+    t1 = k[k < 20].last_valid_index()
     if t1 is None:
         return False, None
 
-    oversold_close = float(recent_df.loc[t1, "Close"])
+    t1_close = float(df.loc[t1, "Close"])
+    t1_pos = df.index.get_loc(t1)
 
-    # 2) 找 t1 後第一次 KD >= 20 的 t_cross
-    k_after_t1 = recent_k[recent_k.index > t1]
-    t_cross = k_after_t1[k_after_t1 >= 20].first_valid_index()
-    if t_cross is None:
+    # 2️⃣ 找 KD 金叉
+    cross_pos = None
+    for i in range(t1_pos + 1, len(df)):
+        if k.iloc[i-1] <= d.iloc[i-1] and k.iloc[i] > d.iloc[i]:
+            cross_pos = i
+            break
+    if cross_pos is None:
         return False, None
 
-    # 3) 從 t_cross（含）後任一天找紅吞黑
-    future_index = [idx for idx in recent_df.index if idx >= t_cross]
-    for dt in future_index:
-        pos = recent_df.index.get_loc(dt)
-        if pos == 0:
+    # 3️⃣ 金叉後 3 天內 KD >= 20
+    kd20_pos = None
+    for i in range(cross_pos, min(cross_pos + kd20_days + 1, len(df))):
+        if k.iloc[i] >= 20 and d.iloc[i] >= 20:
+            kd20_pos = i
+            break
+    if kd20_pos is None:
+        return False, None
+
+    # 4️⃣ 5 天內找紅吞黑
+    for i in range(kd20_pos, min(kd20_pos + trigger_days + 1, len(df))):
+        if i == 0:
             continue
 
-        prev_row = recent_df.iloc[pos - 1]
-        curr_row = recent_df.iloc[pos]
+        prev = df.iloc[i-1]
+        curr = df.iloc[i]
 
-        prev_open, prev_close = float(prev_row["Open"]), float(prev_row["Close"])
-        curr_open, curr_close = float(curr_row["Open"]), float(curr_row["Close"])
+        prev_black = prev.Close < prev.Open
+        curr_red = curr.Close > curr.Open
+        engulf = (curr.Open < prev.Close) and (curr.Close > prev.Open)
 
-        prev_is_black = prev_close < prev_open
-        curr_is_red = curr_close > curr_open
-
-        # 紅吞黑：當天實體包住前一天黑K實體
-        engulf = (curr_open < prev_close) and (curr_close > prev_open)
-
-        # 價格比前次 KD<20 那天收盤更高
-        if prev_is_black and curr_is_red and engulf and (curr_close > oversold_close):
-            return True, dt
+        if prev_black and curr_red and engulf and curr.Close > t1_close:
+            return True, df.index[i]
 
     return False, None
 
@@ -459,7 +474,14 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             d_val = float(d_series.iloc[-1])
 
                             # 打腳：觀察 60 根（新規則）
-                            is_leg_kick, leg_kick_date = detect_leg_kick_signal(stock_df, k_series, lookback=60)
+                            is_leg_kick, leg_kick_date = detect_leg_kick_signal(
+    stock_df,
+    k_series,
+    d_series,
+    lookback=60,
+    kd20_days=3,
+    trigger_days=5
+)
                         else:
                             if len(stock_df) >= 9:
                                 k_val, d_val = calculate_kd_values(stock_df)
@@ -705,8 +727,28 @@ with st.sidebar:
 
     st.caption("⚠️ 回測將使用上方設定的「最低成交量」進行過濾。")
     if st.button("🧪 策略回測"):
-        if strategy_mode == "🦵 打腳發動 (KD+紅吞)":
-            st.warning("『打腳發動』策略目前僅支援即時篩選，尚未開放回測。")
+    st.info("阿吉正在調閱過去2年的歷史檔案，進行深度驗證... (請稍候) ⏳")
+
+    stock_dict = get_stock_list()
+    bt_progress = st.progress(0, text="初始化回測...")
+
+    use_treasure_param = strategy_mode == "🔥 起死回生 (Da來守住)"
+    use_royal_param = strategy_mode == "🐎 多頭馬車發動 (多頭排列)"
+
+    bt_df = run_strategy_backtest(
+        stock_dict,
+        bt_progress,
+        use_trend_up=filter_trend_up,
+        use_treasure=use_treasure_param,
+        use_vol=filter_vol_double,
+        use_royal=use_royal_param,
+        min_vol_threshold=min_vol_input,
+    )
+
+    st.session_state["backtest_result"] = bt_df
+    bt_progress.empty()
+    st.success("回測完成！請查看下方結果。")
+
         else:
             st.info("阿吉正在調閱過去2年的歷史檔案，進行深度驗證... (請稍候) ⏳")
             stock_dict = get_stock_list()
