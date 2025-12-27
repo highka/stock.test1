@@ -10,8 +10,8 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-# 更新：Ver 1.71 - 修復 SyntaxError (括號閉合問題)
-VER = "ver 1.71 (Syntax Fix + UI Restore)"
+# 更新：Ver 1.8 - 補回缺失欄位 (Fix KeyErrors) + 線圖被動觸發
+VER = "ver 1.8 (Fix KeyErrors + Passive Chart)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -77,6 +77,20 @@ def calculate_kd_series(df, n=9):
         k_list.append(k)
         d_list.append(d)
     return pd.Series(k_list, index=df.index), pd.Series(d_list, index=df.index)
+
+def calculate_kd_values(df, n=9):
+    try:
+        low_min = df["Low"].rolling(window=n).min()
+        high_max = df["High"].rolling(window=n).max()
+        rsv = (df["Close"] - low_min) / (high_max - low_min) * 100
+        rsv = rsv.fillna(50)
+        k, d = 50, 50
+        for r in rsv:
+            k = (2/3) * k + (1/3) * r
+            d = (2/3) * d + (1/3) * k
+        return k, d
+    except:
+        return 50, 50
 
 def detect_leg_kick_signal(stock_df, max_lookback=100, trigger_days=5, kd_threshold=20):
     if len(stock_df) < 30: return False, None, 999
@@ -154,6 +168,10 @@ def run_strategy_backtest(stock_dict, progress_bar, mode, min_vol_threshold, loo
                             m30 = c_series.rolling(30).mean().iloc[idx]
                             m60 = c_series.rolling(60).mean().iloc[idx]
                             if c_series.iloc[idx] > m30 > m60: is_match = True
+                        elif mode == "🔥 起死回生 (Da來守住)":
+                            # 回測時的簡易判斷
+                            m200 = c_series.rolling(200).mean().iloc[idx]
+                            if c_series.iloc[idx] > m200 and c_series.iloc[idx-1] < m200: is_match = True
                         
                         if is_match:
                             results.append({
@@ -168,6 +186,9 @@ def run_strategy_backtest(stock_dict, progress_bar, mode, min_vol_threshold, loo
     return pd.DataFrame(results)
 
 def fetch_all_data(stock_dict, progress_bar):
+    """
+    更新：確保所有策略所需的欄位都包含在 raw_data 中，避免 KeyError
+    """
     all_tickers = list(stock_dict.keys())
     BATCH_SIZE = 50
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
@@ -181,17 +202,55 @@ def fetch_all_data(stock_dict, progress_bar):
             for ticker in df_c.columns:
                 try:
                     p = float(df_c[ticker].iloc[-1])
-                    m200 = df_c[ticker].rolling(200).mean().iloc[-1]
+                    ma200_df = df_c[ticker].rolling(200).mean()
+                    ma30_df = df_c[ticker].rolling(30).mean()
+                    ma60_df = df_c[ticker].rolling(60).mean()
+                    
+                    m200 = float(ma200_df.iloc[-1])
+                    m30 = float(ma30_df.iloc[-1])
+                    m60 = float(ma60_df.iloc[-1])
+                    prev_m200 = float(ma200_df.iloc[-21]) if len(ma200_df) > 21 else 0
+
+                    if pd.isna(p) or pd.isna(m200) or m200 == 0: continue
+
                     info = stock_dict[ticker]
                     stock_df = pd.DataFrame({"Open":data["Open"][ticker],"High":data["High"][ticker],"Low":data["Low"][ticker],"Close":df_c[ticker]}).dropna()
+                    
+                    # 計算 KD (所有策略通用)
+                    k_val, d_val = 50.0, 50.0
+                    if len(stock_df) >= 9:
+                        k_val, d_val = calculate_kd_values(stock_df)
+
+                    # 打腳策略
                     leg_kick, leg_date, k20_days = detect_leg_kick_signal(stock_df, max_lookback=100)
+                    
+                    # 起死回生 (Treasure)
+                    is_treasure = False
+                    if len(stock_df) >= 8:
+                        rc = stock_df["Close"].iloc[-8:]
+                        rm = ma200_df.iloc[-8:]
+                        if (rc.iloc[-1] > rm.iloc[-1]) and (rc.iloc[:-1] < rm.iloc[:-1]).any():
+                            is_treasure = True
+
+                    # 皇冠特選 (Royal)
+                    is_royal = (p > m30 > m60 > m200)
+
+                    # 計算乖離與趨勢
+                    bias = ((p - m200) / m200) * 100
+                    ma_trend = "⬆️向上" if m200 >= prev_m200 else "⬇️向下"
+
                     raw_data.append({
                         "代號": info["code"], "名稱": info["name"], "產業": info["group"], "完整代號": ticker,
-                        "收盤價": p, "生命線": round(m200,2) if not pd.isna(m200) else 0,
-                        "乖離率(%)": round((p-m200)/m200*100,2) if not pd.isna(m200) and m200!=0 else 0,
-                        "成交量": int(data["Volume"][ticker].iloc[-1]), "昨日成交量": int(data["Volume"][ticker].iloc[-2]),
+                        "收盤價": p, "生命線": round(m200,2), 
+                        "MA30": round(m30,2), "MA60": round(m60,2),
+                        "乖離率(%)": round(bias, 2), 
+                        "abs_bias": abs(bias),  # 修正：補回絕對值欄位
+                        "生命線趨勢": ma_trend,   # 修正：補回趨勢欄位
+                        "成交量": int(data["Volume"][ticker].iloc[-1]), 
+                        "昨日成交量": int(data["Volume"][ticker].iloc[-2]),
+                        "K值": k_val, "D值": d_val, # 修正：補回KD
                         "打腳發動": leg_kick, "k20_days_ago": k20_days,
-                        "皇冠特選": (p > df_c[ticker].rolling(30).mean().iloc[-1] > df_c[ticker].rolling(60).mean().iloc[-1])
+                        "皇冠特選": is_royal, "浴火重生": is_treasure # 修正：補回浴火重生
                     })
                 except: continue
         except: pass
@@ -203,11 +262,11 @@ def plot_stock_chart(ticker, name):
         df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False)
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
+        
         df["200MA"] = df["Close"].rolling(200).mean()
         df["30MA"] = df["Close"].rolling(30).mean()
         df["60MA"] = df["Close"].rolling(60).mean()
         
-        # --- [修正] 確保所有括號正確閉合 ---
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="收盤價", line=dict(color="#00CC96")))
         fig.add_trace(go.Scatter(x=df.index, y=df["30MA"], name="30MA", line=dict(color="#AB63FA", dash="dot")))
@@ -226,7 +285,7 @@ if "backtest_result" not in st.session_state: st.session_state["backtest_result"
 
 with st.sidebar:
     st.header("資料庫管理")
-    CACHE_FILE = "stock_cache_v171.csv"
+    CACHE_FILE = "stock_cache_v18.csv"
 
     if st.button("🚨 強制重置系統", type="primary"):
         st.cache_data.clear(); st.session_state.clear()
@@ -236,8 +295,10 @@ with st.sidebar:
     if os.path.exists(CACHE_FILE) and st.session_state["master_df"] is None:
         try:
             df_loaded = pd.read_csv(CACHE_FILE)
-            if "k20_days_ago" not in df_loaded.columns:
-                st.error("⚠️ 資料結構過舊，請點擊上方 **「🚨 強制重置系統」**")
+            # 檢查關鍵欄位是否存在，不存在則報錯重置
+            req_cols = ["k20_days_ago", "浴火重生", "abs_bias"]
+            if not all(col in df_loaded.columns for col in req_cols):
+                st.error("⚠️ 資料欄位缺失，請點擊上方 **「🚨 強制重置系統」**")
                 st.session_state["master_df"] = None 
             else:
                 st.session_state["master_df"] = df_loaded
@@ -246,7 +307,7 @@ with st.sidebar:
 
     st.divider()
     st.header("1. 策略設定")
-    strategy_mode = st.radio("選擇策略", ["🛡️ 生命線保衛戰", "🔥 起死回生", "🐎 多頭馬車發動 (多頭排列)", "🦵 打腳發動 (KD+紅吞)"])
+    strategy_mode = st.radio("選擇策略", ["🛡️ 生命線保衛戰", "🔥 起死回生", "🐎 多頭馬車", "🦵 打腳發動 (KD+紅吞)"])
     
     leg_kick_days_filter = 60
     if strategy_mode == "🦵 打腳發動 (KD+紅吞)":
@@ -258,13 +319,20 @@ with st.sidebar:
     min_vol = st.number_input("最低成交量(張)", 500, 10000, 1000)
     bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 5.0, 2.5, step=0.1)
     
+    # 生命線專用
+    filter_trend_up = False; filter_trend_down = False; filter_kd = False
+    if strategy_mode == "🛡️ 生命線保衛戰":
+        c1, c2 = st.columns(2)
+        with c1: filter_trend_up = st.checkbox("生命線向上")
+        with c2: filter_trend_down = st.checkbox("生命線向下")
+        filter_kd = st.checkbox("KD 黃金交叉")
+
     st.divider()
     st.header("2. 執行操作")
 
     if st.button("🔄 下載最新股價", type="secondary"):
         stock_dict = get_stock_list()
         
-        # 動畫區
         placeholder = st.empty()
         with placeholder:
             st.markdown("""<div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">🎁💰✨</div>
@@ -299,21 +367,31 @@ else:
     df_res = st.session_state["master_df"].copy()
     df_res = df_res[df_res["成交量"] >= min_vol*1000]
     
+    # 策略分流
     if strategy_mode == "🦵 打腳發動 (KD+紅吞)":
         if "k20_days_ago" not in df_res.columns: st.error("資料過期，請重置！"); st.stop()
         df_res = df_res[df_res["打腳發動"] == True]
-        df_res = df_res[df_res["k20_days_ago"] <= leg_kick_days_filter] # 即時過濾
+        df_res = df_res[df_res["k20_days_ago"] <= leg_kick_days_filter] 
     elif strategy_mode == "🐎 多頭馬車發動 (多頭排列)":
         df_res = df_res[df_res["皇冠特選"] == True]
     elif strategy_mode == "🔥 起死回生":
+        # 修正：確保欄位存在
+        if "浴火重生" not in df_res.columns: st.error("資料過期，請重置！"); st.stop()
         df_res = df_res[df_res["浴火重生"] == True]
     else:
+        # 生命線保衛戰
+        if "abs_bias" not in df_res.columns: st.error("資料過期，請重置！"); st.stop()
         df_res = df_res[df_res["abs_bias"] <= bias_threshold]
+        if filter_trend_up: df_res = df_res[df_res["生命線趨勢"] == "⬆️向上"]
+        if filter_trend_down: df_res = df_res[df_res["生命線趨勢"] == "⬇️向下"]
+        if filter_kd: df_res = df_res[df_res["K值"] > df_res["D值"]]
     
     st.subheader(f"🔍 今日篩選結果 ({strategy_mode}) - 共 {len(df_res)} 檔")
     
     if not df_res.empty:
         df_res["成交量(張)"] = (df_res["成交量"]/1000).astype(int)
+        
+        # 顯示欄位設定
         cols = ["代號", "名稱", "產業", "收盤價", "生命線", "乖離率(%)", "成交量(張)"]
         if strategy_mode == "🦵 打腳發動 (KD+紅吞)":
             df_res = df_res.rename(columns={"k20_days_ago": "前置K<20(天前)"})
@@ -326,19 +404,27 @@ else:
         try: st.dataframe(style_dataframe(df_res[cols]), use_container_width=True, hide_index=True)
         except: st.dataframe(df_res[cols], use_container_width=True, hide_index=True)
         
+        st.divider()
+        st.markdown("### 📊 個股走勢圖 (請選取股票)")
+        
+        # 修正：被動觸發線圖
+        # 使用 index=None 讓預設為空
         c_sel, c_chart = st.columns([1, 3])
         with c_sel:
             stock_list = df_res["名稱"].tolist()
-            if stock_list:
-                sel_stock = st.radio("點擊查看個股：", stock_list)
-                row_data = df_res[df_res["名稱"]==sel_stock].iloc[0]
+            sel_stock = st.selectbox("請選擇股票：", stock_list, index=None, placeholder="點此選擇以查看線圖...")
+        
         with c_chart:
-            if stock_list:
+            if sel_stock:
+                row_data = df_res[df_res["名稱"]==sel_stock].iloc[0]
                 plot_stock_chart(row_data["完整代號"], row_data["名稱"])
                 m1, m2, m3 = st.columns(3)
                 m1.metric("收盤價", row_data['收盤價'])
                 m2.metric("成交量", f"{row_data['成交量(張)']} 張")
                 m3.metric("乖離率", f"{row_data['乖離率(%)']}%")
+            else:
+                st.info("👈 請在左側選單選擇一檔股票來顯示線圖")
+
     else:
         st.info("今日盤面沒有符合此策略的標的，試試調整參數？")
 
