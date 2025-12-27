@@ -5,3 +5,4 @@ twstock
 plotly
 requests
 lxml
+matplotlib
