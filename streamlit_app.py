@@ -10,8 +10,8 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-# 更新：Ver 1.7 - 找回遺失的動畫與重置按鈕，功能全開版
-VER = "ver 1.7 (UI Restore + Instant Filter)"
+# 更新：Ver 1.71 - 修復 SyntaxError (括號閉合問題)
+VER = "ver 1.71 (Syntax Fix + UI Restore)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -206,6 +206,148 @@ def plot_stock_chart(ticker, name):
         df["200MA"] = df["Close"].rolling(200).mean()
         df["30MA"] = df["Close"].rolling(30).mean()
         df["60MA"] = df["Close"].rolling(60).mean()
+        
+        # --- [修正] 確保所有括號正確閉合 ---
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="收盤價", line=dict(color="#00CC96")))
-        fig.add_trace(go.Scatter(x=df.index, y=df["30MA"], name
+        fig.add_trace(go.Scatter(x=df.index, y=df["30MA"], name="30MA", line=dict(color="#AB63FA", dash="dot")))
+        fig.add_trace(go.Scatter(x=df.index, y=df["60MA"], name="60MA", line=dict(color="#19D3F3", dash="dot")))
+        fig.add_trace(go.Scatter(x=df.index, y=df["200MA"], name="生命線", line=dict(color="#FFA15A", width=2)))
+        
+        fig.update_layout(title=f"📊 {name} ({ticker})", height=450, hovermode="x unified")
+        st.plotly_chart(fig, use_container_width=True)
+    except: st.error("圖表載入失敗")
+
+# --- 3. 介面區 ---
+st.title(f"✨ {VER} 黑嚕嚕-旗鼓相當")
+
+if "master_df" not in st.session_state: st.session_state["master_df"] = None
+if "backtest_result" not in st.session_state: st.session_state["backtest_result"] = None
+
+with st.sidebar:
+    st.header("資料庫管理")
+    CACHE_FILE = "stock_cache_v171.csv"
+
+    if st.button("🚨 強制重置系統", type="primary"):
+        st.cache_data.clear(); st.session_state.clear()
+        if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
+        st.rerun()
+
+    if os.path.exists(CACHE_FILE) and st.session_state["master_df"] is None:
+        try:
+            df_loaded = pd.read_csv(CACHE_FILE)
+            if "k20_days_ago" not in df_loaded.columns:
+                st.error("⚠️ 資料結構過舊，請點擊上方 **「🚨 強制重置系統」**")
+                st.session_state["master_df"] = None 
+            else:
+                st.session_state["master_df"] = df_loaded
+                st.success("⚡ 歷史資料已載入")
+        except: pass
+
+    st.divider()
+    st.header("1. 策略設定")
+    strategy_mode = st.radio("選擇策略", ["🛡️ 生命線保衛戰", "🔥 起死回生", "🐎 多頭馬車發動 (多頭排列)", "🦵 打腳發動 (KD+紅吞)"])
+    
+    leg_kick_days_filter = 60
+    if strategy_mode == "🦵 打腳發動 (KD+紅吞)":
+        st.markdown("---")
+        st.info("💡 調整下方滑桿，可即時過濾結果 (不需重新下載)")
+        leg_kick_days_filter = st.slider("🦵 前置搜尋天數 (K<20)", 20, 100, 60, step=5)
+        st.markdown("---")
+
+    min_vol = st.number_input("最低成交量(張)", 500, 10000, 1000)
+    bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 5.0, 2.5, step=0.1)
+    
+    st.divider()
+    st.header("2. 執行操作")
+
+    if st.button("🔄 下載最新股價", type="secondary"):
+        stock_dict = get_stock_list()
+        
+        # 動畫區
+        placeholder = st.empty()
+        with placeholder:
+            st.markdown("""<div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">🎁💰✨</div>
+            <style>@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }</style>
+            <div style="text-align: center;">正在挖掘寶藏中...</div>""", unsafe_allow_html=True)
+        
+        pb = st.progress(0)
+        df_new = fetch_all_data(stock_dict, pb)
+        
+        placeholder.empty()
+        
+        if not df_new.empty:
+            df_new.to_csv(CACHE_FILE, index=False)
+            st.session_state["master_df"] = df_new
+            st.rerun()
+    
+    if st.button("🧪 執行策略回測"):
+        stock_dict = get_stock_list()
+        pb_bt = st.progress(0, text="正在驗證歷史訊號...")
+        bt_df = run_strategy_backtest(stock_dict, pb_bt, strategy_mode, min_vol, leg_kick_days_filter)
+        st.session_state["backtest_result"] = bt_df
+
+# 主畫面
+if st.session_state["master_df"] is None:
+    st.warning("👈 請先點擊左側 sidebar **「🔄 下載最新股價」**")
+    col1, col2, col3 = st.columns([1, 3, 1])
+    with col2:
+        if os.path.exists("welcome.jpg"):
+            st.image("welcome.jpg", use_container_width=True)
+            st.markdown("<p style='text-align:center; font-size:1.2em;'>預祝心想事成，從從容容，紫氣東來! 🟣✨</p>", unsafe_allow_html=True)
+else:
+    df_res = st.session_state["master_df"].copy()
+    df_res = df_res[df_res["成交量"] >= min_vol*1000]
+    
+    if strategy_mode == "🦵 打腳發動 (KD+紅吞)":
+        if "k20_days_ago" not in df_res.columns: st.error("資料過期，請重置！"); st.stop()
+        df_res = df_res[df_res["打腳發動"] == True]
+        df_res = df_res[df_res["k20_days_ago"] <= leg_kick_days_filter] # 即時過濾
+    elif strategy_mode == "🐎 多頭馬車發動 (多頭排列)":
+        df_res = df_res[df_res["皇冠特選"] == True]
+    elif strategy_mode == "🔥 起死回生":
+        df_res = df_res[df_res["浴火重生"] == True]
+    else:
+        df_res = df_res[df_res["abs_bias"] <= bias_threshold]
+    
+    st.subheader(f"🔍 今日篩選結果 ({strategy_mode}) - 共 {len(df_res)} 檔")
+    
+    if not df_res.empty:
+        df_res["成交量(張)"] = (df_res["成交量"]/1000).astype(int)
+        cols = ["代號", "名稱", "產業", "收盤價", "生命線", "乖離率(%)", "成交量(張)"]
+        if strategy_mode == "🦵 打腳發動 (KD+紅吞)":
+            df_res = df_res.rename(columns={"k20_days_ago": "前置K<20(天前)"})
+            cols = ["代號", "名稱", "產業", "收盤價", "乖離率(%)", "前置K<20(天前)", "成交量(張)"]
+
+        # 表格顏色
+        def style_dataframe(df):
+            return df.style.map(lambda x: f'color: {"#ff4b4b" if x > 0 else "#008000"}; font-weight: bold', subset=["乖離率(%)"]).format("{:.2f}", subset=["收盤價", "乖離率(%)"])
+
+        try: st.dataframe(style_dataframe(df_res[cols]), use_container_width=True, hide_index=True)
+        except: st.dataframe(df_res[cols], use_container_width=True, hide_index=True)
+        
+        c_sel, c_chart = st.columns([1, 3])
+        with c_sel:
+            stock_list = df_res["名稱"].tolist()
+            if stock_list:
+                sel_stock = st.radio("點擊查看個股：", stock_list)
+                row_data = df_res[df_res["名稱"]==sel_stock].iloc[0]
+        with c_chart:
+            if stock_list:
+                plot_stock_chart(row_data["完整代號"], row_data["名稱"])
+                m1, m2, m3 = st.columns(3)
+                m1.metric("收盤價", row_data['收盤價'])
+                m2.metric("成交量", f"{row_data['成交量(張)']} 張")
+                m3.metric("乖離率", f"{row_data['乖離率(%)']}%")
+    else:
+        st.info("今日盤面沒有符合此策略的標的，試試調整參數？")
+
+if st.session_state["backtest_result"] is not None:
+    st.divider()
+    st.subheader("🧪 策略歷史回測報告")
+    res_df = st.session_state["backtest_result"]
+    if not res_df.empty:
+        def style_backtest(df):
+            return df.style.map(lambda x: f'color: {"#ff4b4b" if x > 0 else "#008000"}', subset=["最高漲幅(%)"])
+        st.dataframe(style_backtest(res_df), use_container_width=True, hide_index=True)
+    else: st.write("無回測數據。")
