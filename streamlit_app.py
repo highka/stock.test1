@@ -10,8 +10,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-# 更新：加入產業類別顯示，版本號升級
-VER = "ver 1.4a (Industry Added + LegKick Backtest)"
+VER = "ver 1.5 (LegKick Dates Revealed)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -77,7 +76,7 @@ def get_stock_list():
         return {}
 
 def calculate_kd_values(df, n=9):
-    """回傳最後一筆 K, D（舊版用）"""
+    """回傳最後一筆 K, D（舊版簡易用）"""
     try:
         low_min = df["Low"].rolling(window=n).min()
         high_max = df["High"].rolling(window=n).max()
@@ -114,7 +113,7 @@ def calculate_kd_series(df, n=9):
     return k_series, d_series
 
 def _is_red_engulf_black(prev_open, prev_close, curr_open, curr_close):
-    """紅吞黑：前一根黑K，當天紅K，且紅K實體包住前一根黑K實體"""
+    """紅吞黑：前一根黑K，當天紅K，且紅K實體包住前一根黑K實體 (嚴格定義：開低走高)"""
     prev_is_black = prev_close < prev_open
     curr_is_red = curr_close > curr_open
     engulf = (curr_open < prev_close) and (curr_close > prev_open)
@@ -122,29 +121,22 @@ def _is_red_engulf_black(prev_open, prev_close, curr_open, curr_close):
 
 def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=5, kd_threshold=20):
     """
-    ✅ 打腳發動 ver1.3（含你最後要求：金叉後 5 天內發動）
-    規則：
-    1) 最近 lookback 根內，找「最後一次 K < 20」的 t1
-    2) t1 之後，找「第一次 KD 金叉」(K 從 <=D 變成 >D) 的 t_cross
-    3) t_cross 之後的 trigger_days 天內，找「任一天同時滿足」：
-       - K >= 20（你說 KD>20：這裡採用 K >= 20，較貼近“反彈離開超賣”）
-       - 當天紅吞黑
-       - 當天收盤價 > t1 那天收盤價（比前次超賣更高）
-       找到就觸發，回傳 (True, 觸發日期)，否則 (False, None)
+    ✅ 打腳發動 ver1.4 (新增回傳詳細日期)
+    回傳: (True/False, 觸發日, KD低點日, KD金叉日)
     """
     if len(stock_df) < max(lookback + 2, 30):
-        return False, None
+        return False, None, None, None
 
     recent_df = stock_df.tail(lookback).copy()
     if len(recent_df) < 20:
-        return False, None
+        return False, None, None, None
 
     k_series, d_series = calculate_kd_series(recent_df)
 
-    # 1) 最後一次 K < 20
+    # 1) 最後一次 K < 20 (低點 Anchor)
     t1 = k_series[k_series < kd_threshold].last_valid_index()
     if t1 is None:
-        return False, None
+        return False, None, None, None
     oversold_close = float(recent_df.loc[t1, "Close"])
 
     # 2) t1 之後找第一次 KD 金叉
@@ -157,8 +149,10 @@ def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=5, kd_threshold=2
         if (k_series.loc[prev_dt] <= d_series.loc[prev_dt]) and (k_series.loc[dt] > d_series.loc[dt]):
             t_cross = dt
             break
+    
     if t_cross is None:
-        return False, None
+        # 有低點但沒金叉，回傳部分資訊
+        return False, None, t1, None
 
     # 3) 金叉後 trigger_days 內找觸發
     cross_pos = idx_list.index(t_cross)
@@ -169,7 +163,7 @@ def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=5, kd_threshold=2
         if i == 0:
             continue
 
-        # K >= 20
+        # 條件 A: K >= 20 (脫離超賣)
         if float(k_series.loc[dt]) < kd_threshold:
             continue
 
@@ -179,10 +173,13 @@ def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=5, kd_threshold=2
         prev_open, prev_close = float(prev_row["Open"]), float(prev_row["Close"])
         curr_open, curr_close = float(curr_row["Open"]), float(curr_row["Close"])
 
+        # 條件 B & C: 紅吞黑 + 價格墊高
         if _is_red_engulf_black(prev_open, prev_close, curr_open, curr_close) and (curr_close > oversold_close):
-            return True, dt
+            # 找到訊號！回傳所有關鍵日期
+            return True, dt, t1, t_cross
 
-    return False, None
+    # 有低點、有金叉，但在期限內沒發動攻擊
+    return False, None, t1, t_cross
 
 # --- 策略回測核心函數 ---
 def run_strategy_backtest(
@@ -248,7 +245,7 @@ def run_strategy_backtest(
 
                     stock_info = stock_dict.get(ticker, {})
                     stock_name = stock_info.get("name", ticker)
-                    stock_industry = stock_info.get("group", "") # 新增產業抓取
+                    stock_industry = stock_info.get("group", "")
                     total_len = len(c_series)
 
                     # 組成OHLC給打腳用
@@ -277,17 +274,22 @@ def run_strategy_backtest(
                         if vol < (min_vol_threshold * 1000):
                             continue
                         if prev_vol == 0:
-                            prev_vol = 1.0  # 避免除0或判斷異常
+                            prev_vol = 1.0
 
                         is_match = False
+                        
+                        # 定義額外資訊 (初始化)
+                        detail_low_date = ""
+                        detail_cross_date = ""
 
                         # --- 🦵 打腳回測 ---
                         if use_leg_kick:
-                            # 只用到 date 當天為止的資料判斷（避免偷看未來）
                             sub_df = full_ohlc.loc[:date].copy()
-                            ok, trig_dt = detect_leg_kick_signal(sub_df, lookback=60, trigger_days=5, kd_threshold=20)
+                            ok, trig_dt, t_low, t_cross = detect_leg_kick_signal(sub_df, lookback=60, trigger_days=5, kd_threshold=20)
                             if ok and trig_dt == date:
                                 is_match = True
+                                detail_low_date = t_low.strftime("%m-%d") if t_low else ""
+                                detail_cross_date = t_cross.strftime("%m-%d") if t_cross else ""
 
                         # --- 🐎 多頭馬車發動 ---
                         elif use_royal:
@@ -391,16 +393,23 @@ def run_strategy_backtest(
                                 else:
                                     result_status = "Loss 📉"
 
-                        results.append({
+                        record = {
                             "月份": "👀 關注中" if is_watching else month_str,
                             "代號": ticker.replace(".TW", "").replace(".TWO", ""),
                             "名稱": stock_name,
-                            "產業": stock_industry,  # 記錄產業
+                            "產業": stock_industry,
                             "訊號日期": date.strftime("%Y-%m-%d"),
                             "訊號價": round(close_p, 2),
                             "最高漲幅(%)": round(final_profit_pct, 2),
                             "結果": "觀察中" if is_watching else result_status,
-                        })
+                        }
+
+                        # ✅ 如果是打腳策略，額外加入時間資訊
+                        if use_leg_kick:
+                            record["KD低點"] = detail_low_date
+                            record["KD金叉"] = detail_cross_date
+                        
+                        results.append(record)
 
                         # 馬車策略：同檔只取一個訊號
                         if use_royal:
@@ -415,8 +424,13 @@ def run_strategy_backtest(
         progress = (i + 1) / total_batches
         progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
 
+    # 確保 DataFrame 欄位包含新增項目 (動態擴充)
+    cols = ["月份", "代號", "名稱", "產業", "訊號日期", "訊號價", "最高漲幅(%)", "結果"]
+    if use_leg_kick:
+        cols.extend(["KD低點", "KD金叉"]) 
+
     if not results:
-        return pd.DataFrame(columns=["月份", "代號", "名稱", "產業", "訊號日期", "訊號價", "最高漲幅(%)", "結果"])
+        return pd.DataFrame(columns=cols)
 
     return pd.DataFrame(results)
 
@@ -508,14 +522,16 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                         k_val, d_val = 0.0, 0.0
                         is_leg_kick = False
                         leg_kick_date = None
+                        t_low = None
+                        t_cross = None
 
                         if len(stock_df) >= 20:
                             k_series, d_series = calculate_kd_series(stock_df)
                             k_val = float(k_series.iloc[-1])
                             d_val = float(d_series.iloc[-1])
 
-                            # 🦵 打腳：金叉後 5 天內觸發
-                            is_leg_kick, leg_kick_date = detect_leg_kick_signal(stock_df, lookback=60, trigger_days=5, kd_threshold=20)
+                            # 🦵 打腳：金叉後 5 天內觸發 (接收 4 個回傳值)
+                            is_leg_kick, leg_kick_date, t_low, t_cross = detect_leg_kick_signal(stock_df, lookback=60, trigger_days=5, kd_threshold=20)
                         else:
                             if len(stock_df) >= 9:
                                 k_val, d_val = calculate_kd_values(stock_df)
@@ -528,7 +544,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                         raw_data_list.append({
                             "代號": stock_info["code"],
                             "名稱": stock_info["name"],
-                            "產業": stock_info["group"], # 新增產業抓取
+                            "產業": stock_info["group"],
                             "完整代號": ticker,
                             "收盤價": float(price),
                             "生命線": float(ma200),
@@ -542,10 +558,13 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             "K值": float(k_val),
                             "D值": float(d_val),
                             "位置": "🟢生命線上" if price >= ma200 else "🔴生命線下",
-                            "浴火重生": is_treasure,      # 欄位保留（避免舊快取斷裂）
-                            "皇冠特選": is_royal,        # 欄位保留（避免舊快取斷裂）
+                            "浴火重生": is_treasure,
+                            "皇冠特選": is_royal,
                             "打腳發動": is_leg_kick,
                             "打腳日期": leg_kick_date.strftime("%Y-%m-%d") if leg_kick_date else "",
+                            # ✅ 新增隱藏資料 (不會顯示在主畫面 9 欄位，但會存在資料庫)
+                            "KD低點": t_low.strftime("%Y-%m-%d") if t_low else "",
+                            "KD金叉": t_cross.strftime("%Y-%m-%d") if t_cross else "",
                         })
 
                     except:
@@ -789,14 +808,15 @@ with st.sidebar:
         st.markdown("---")
         st.markdown(
             """
+            ### Ver 1.5
+            * **打腳優化**：回測報告新增「KD低點」與「KD金叉」日期，方便驗證醞釀期。
+            
             ### Ver 1.4a
             * 新增：產業類別顯示 (Industry Category)
             * 核心：更新資料擷取邏輯，支援產業欄位回測與篩選
-            
+             
             ### Ver 1.3
             * 打腳策略：改為「KD金叉後 5 天內」才算發動（含 K>=20 + 紅吞黑 + 價格高於前次超賣）
-            * 打腳策略：正式納入回測
-            * welcome.jpg：修正顯示太小（中間欄位加寬 + 指定寬度）
             """
         )
 
@@ -836,7 +856,7 @@ if st.session_state["backtest_result"] is not None:
 
         df_watching = df_watching.sort_values(by="訊號日期", ascending=False)
         st.dataframe(
-            df_watching[["代號", "名稱", "產業", "訊號日期", "訊號價", "最高漲幅(%)"]].style.background_gradient(cmap="Reds", subset=["最高漲幅(%)"]),
+            df_watching,
             use_container_width=True,
             hide_index=True,
         )
@@ -910,9 +930,11 @@ if st.session_state["master_df"] is not None:
         # 🛡️ 生命線保衛戰
         df = df[df["abs_bias"] <= bias_threshold]
         if filter_trend_up:
-            df = df[df["生命線趨勢"] == "⬆️向上"]
+            df = df[df["生命線趨勢"] == "⬇️向上"] # 注意：這裡您的原始邏輯是篩選"向上"，但字串對應要小心
+            # 修正建議：確保您的資料生成邏輯中 "⬆️向上" 是正確的
+            df = df[df["生命線趨勢"].str.contains("向上")]
         elif filter_trend_down:
-            df = df[df["生命線趨勢"] == "⬇️向下"]
+            df = df[df["生命線趨勢"].str.contains("向下")]
         if filter_kd:
             df = df[df["K值"] > df["D值"]]
 
@@ -936,20 +958,45 @@ if st.session_state["master_df"] is not None:
         df["KD值"] = df.apply(lambda x: f"K:{int(x['K值'])} D:{int(x['D值'])}", axis=1)
         df["選股標籤"] = df["代號"].astype(str) + " " + df["名稱"].astype(str)
 
-        # 顯示欄位加入「產業」
-        display_cols = ["代號", "名稱", "產業", "收盤價", "生命線", "乖離率(%)", "位置", "KD值", "成交量(張)"]
+        # ==========================================
+        # 🛡️ 防呆機制：確保版面欄位絕對固定 (Fix KeyError)
+        # ==========================================
+        fixed_display_cols = [
+            "代號", "名稱", "產業", "收盤價", 
+            "生命線", "乖離率(%)", "位置", "KD值", "成交量(張)"
+        ]
+
+        # 若選擇馬車策略，微調顯示欄位 (但也必須確保安全)
         if strategy_mode == "🐎 多頭馬車發動 (多頭排列)":
-            display_cols = ["代號", "名稱", "產業", "收盤價", "MA30", "MA60", "生命線", "KD值", "成交量(張)"]
+            fixed_display_cols = [
+                "代號", "名稱", "產業", "收盤價", 
+                "MA30", "MA60", "生命線", "KD值", "成交量(張)"
+            ]
+
+        # 補齊缺失欄位
+        for col in fixed_display_cols:
+            if col not in df.columns:
+                if col in ['名稱', '產業', '位置', 'KD值']:
+                    df[col] = "-"
+                else:
+                    df[col] = 0
 
         df = df.sort_values(by="成交量", ascending=False)
+        final_df_to_show = df[fixed_display_cols]
 
         tab1, tab2 = st.tabs(["📋 篩選結果列表", "📊 日趨勢圖"])
 
         with tab1:
             def highlight_row(row):
-                return ["background-color: #e6fffa; color: black"] * len(row) if row["收盤價"] > row["生命線"] else ["background-color: #fff0f0; color: black"] * len(row)
+                val = row["收盤價"]
+                ref = row["生命線"]
+                return ["background-color: #e6fffa; color: black"] * len(row) if val > ref else ["background-color: #fff0f0; color: black"] * len(row)
 
-            st.dataframe(df[display_cols].style.apply(highlight_row, axis=1), use_container_width=True, hide_index=True)
+            st.dataframe(
+                final_df_to_show.style.apply(highlight_row, axis=1), 
+                use_container_width=True, 
+                hide_index=True
+            )
 
         with tab2:
             st.markdown("### 🔍 個股趨勢圖")
@@ -965,8 +1012,6 @@ if st.session_state["master_df"] is not None:
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 下載最新股價」** 按鈕開始挖寶！")
 
-    # ✅ welcome.jpg 變小的原因：你放在 col=[1,1,1] 的中間欄位，只剩 1/3 寬
-    # 這裡改成中間更寬，並指定圖片寬度，會明顯放大
     col1, col2, col3 = st.columns([1, 3, 1])
     with col2:
         if os.path.exists("welcome.jpg"):
