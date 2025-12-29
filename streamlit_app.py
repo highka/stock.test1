@@ -1004,10 +1004,29 @@ if st.session_state["master_df"] is not None:
             selected_row = df[df["選股標籤"] == selected_stock_label].iloc[0]
             plot_stock_chart(selected_row["完整代號"], selected_row["名稱"])
 
+            # --- 原有的 3 欄資訊 ---
             c1, c2, c3 = st.columns(3)
             c1.metric("收盤價", f"{selected_row['收盤價']:.2f}")
             c2.metric("成交量", f"{selected_row['成交量(張)']} 張")
             c3.metric("KD", selected_row["KD值"])
+            
+            # --- ✨ 新增：揭露隱藏的打腳關鍵日期 (僅在詳細頁顯示) ---
+            st.markdown("---")
+            st.caption("🦵 打腳策略詳細數據 (隱藏欄位):")
+            
+            k_col1, k_col2, k_col3 = st.columns(3)
+            
+            # 取得隱藏數據，若無則顯示 "-"
+            kick_date = selected_row.get("打腳日期", "-")
+            low_date = selected_row.get("KD低點", "-")
+            cross_date = selected_row.get("KD金叉", "-")
+            
+            with k_col1:
+                st.info(f"📉 KD落底日 (Anchor)\n\n**{low_date}**")
+            with k_col2:
+                st.warning(f"⚔️ KD金叉日 (Cross)\n\n**{cross_date}**")
+            with k_col3:
+                st.success(f"🚀 發動攻擊日 (Trigger)\n\n**{kick_date}**")
 
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 下載最新股價」** 按鈕開始挖寶！")
