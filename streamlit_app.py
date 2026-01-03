@@ -10,13 +10,14 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 2.8 (3-Day Recency Filter)"
+VER = "ver 3.1 (Neckline K-Level Visible)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
 LOG_FILE = "traffic_log.csv"
 
 def get_remote_ip():
+    """嘗試取得使用者 IP"""
     try:
         from streamlit.web.server.websocket_headers import _get_websocket_headers
         headers = _get_websocket_headers()
@@ -27,6 +28,7 @@ def get_remote_ip():
     return "Unknown/Local"
 
 def log_traffic():
+    """紀錄使用者訪問"""
     if "session_id" not in st.session_state:
         st.session_state["session_id"] = str(uuid.uuid4())[:8]
         st.session_state["has_logged"] = False
@@ -51,6 +53,7 @@ log_traffic()
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_list():
+    """取得台股清單 (排除金融/ETF)"""
     try:
         tse = twstock.twse
         otc = twstock.tpex
@@ -67,6 +70,7 @@ def get_stock_list():
         return {}
 
 def calculate_kd_values(df, n=9):
+    """回傳最後一筆 K, D（簡易用）"""
     try:
         low_min = df["Low"].rolling(window=n).min()
         high_max = df["High"].rolling(window=n).max()
@@ -81,6 +85,7 @@ def calculate_kd_values(df, n=9):
         return 50, 50
 
 def calculate_kd_series(df, n=9):
+    """回傳整條 K / D 序列"""
     low_min = df["Low"].rolling(window=n).min()
     high_max = df["High"].rolling(window=n).max()
     rsv = (df["Close"] - low_min) / (high_max - low_min) * 100
@@ -99,16 +104,29 @@ def calculate_kd_series(df, n=9):
     return k_series, d_series
 
 def _is_red_engulf_black(prev_open, prev_close, curr_open, curr_close):
+    """紅吞黑 (多頭發動訊號 - 允許平盤開出)"""
     prev_is_black = prev_close < prev_open
     curr_is_red = curr_close > curr_open
     engulf = (curr_open <= prev_close) and (curr_close > prev_open)
     return prev_is_black and curr_is_red and engulf
 
 def _is_gap_up_attack(prev_close, prev_high, curr_open, curr_close):
+    """跳空攻擊 (多頭發動訊號)"""
     is_gap_up = curr_open > prev_close 
     is_red = curr_close > curr_open    
     break_high = curr_close > prev_high 
     return is_gap_up and is_red and break_high
+
+def _is_bearish_engulfing(prev_open, prev_close, curr_open, curr_close):
+    """
+    黑吞紅 (空方/頸線確認訊號)
+    邏輯：昨天紅K，今天黑K，且今天實體吞噬昨天實體。
+    """
+    prev_is_red = prev_close > prev_open
+    curr_is_black = curr_close < curr_open
+    # 吞噬定義：今開 >= 昨收 (開高) 且 今收 <= 昨開 (殺低)
+    engulf = (curr_open >= prev_close) and (curr_close <= prev_open)
+    return prev_is_red and curr_is_black and engulf
 
 # --- 舊版打腳訊號 (蓄勢待發) ---
 def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=20):
@@ -151,46 +169,76 @@ def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=2
 
     return False, None, t1, t_cross
 
-# --- 🔥 光神腳 (Ver 2.7 結構高點頸線版) ---
+# --- 🔥 光神腳 (Ver 3.1 頸線K值揭露版) ---
 def detect_w_bottom_signal(stock_df, k_series, d_series, lookback=60):
-    if len(stock_df) < 30: return False, None, None, None
+    """
+    光神腳策略 Ver 3.1:
+    1. 左腳 (Left Leg): K < 20 且為區間最低價.
+    2. 頸線 (Neckline): 左腳後出現的【第一個】「黑吞紅」。
+       * 不再強制 K<80，但會回傳頸線 K 值供使用者判斷。
+    3. 右腳 (Right Leg): 頸線後的回測低點 > 左腳低點.
+    4. 發動 (Trigger): 今日收紅表態.
+    
+    Returns: True, t_left, t_right, t_peak, peak_k_val
+    """
+    if len(stock_df) < 30: return False, None, None, None, 0
     
     valid_idx = stock_df.index.intersection(k_series.index)
-    if len(valid_idx) < 30: return False, None, None, None
+    if len(valid_idx) < 30: return False, None, None, None, 0
     
     target_k = k_series.loc[valid_idx].tail(lookback)
     target_price = stock_df.loc[valid_idx].tail(lookback)
     
-    # 1. 尋找左腳
+    # 1. 尋找左腳 (K < 20)
     k_under_20 = target_k[target_k < 20]
-    if k_under_20.empty: return False, None, None, None
+    if k_under_20.empty: return False, None, None, None, 0
+    
     left_leg_candidates = target_price.loc[k_under_20.index]
     t_left = left_leg_candidates["Low"].idxmin()
     t_left_pos = valid_idx.get_loc(t_left)
     
-    if t_left_pos > len(valid_idx) - 5: return False, None, None, None
+    if t_left_pos > len(valid_idx) - 5: return False, None, None, None, 0
     left_low = float(stock_df.loc[t_left, "Low"])
     
-    # 2. 尋找右腳 (波段最低)
+    # 2. 尋找頸線 (第一個黑吞紅)
+    # 範圍: 左腳之後 ~ 今天前2天
+    end_scan_pos = len(valid_idx) - 2
+    t_peak = None
+    peak_k_val = 0.0
+    
+    for i in range(t_left_pos + 1, end_scan_pos):
+        curr_dt = valid_idx[i]
+        prev_dt = valid_idx[i-1]
+        curr_row = stock_df.loc[curr_dt]
+        prev_row = stock_df.loc[prev_dt]
+        
+        # 條件: 黑吞紅
+        if _is_bearish_engulfing(prev_row['Open'], prev_row['Close'], curr_row['Open'], curr_row['Close']):
+            # 找到第一個就鎖定，不管 K 值多少
+            t_peak = curr_dt
+            peak_k_val = float(k_series.loc[curr_dt])
+            break 
+    
+    if t_peak is None: return False, None, None, None, 0 # 無黑吞
+    
+    # 3. 尋找右腳 (在頸線之後)
+    t_peak_pos = valid_idx.get_loc(t_peak)
     t_today = valid_idx[-1]
-    structure_start = t_left_pos + 2
-    structure_end = len(valid_idx) - 1
-    if structure_start >= structure_end: return False, None, None, None
-    search_period = stock_df.iloc[structure_start:structure_end]
-    t_right = search_period["Low"].idxmin()
+    
+    if t_peak_pos >= len(valid_idx) - 2: return False, None, None, None, 0
+    
+    right_leg_mask = (valid_idx > t_peak) & (valid_idx < t_today)
+    right_leg_period = stock_df.loc[right_leg_mask]
+    
+    if right_leg_period.empty: return False, None, None, None, 0
+    
+    t_right = right_leg_period["Low"].idxmin()
     right_low = float(stock_df.loc[t_right, "Low"])
     
-    if right_low <= left_low * 0.99: return False, None, None, None
-    
-    # 3. 尋找頸線 (波段最高)
-    peak_search_mask = (valid_idx > t_left) & (valid_idx < t_right)
-    peak_search_period = stock_df.loc[peak_search_mask]
-    if peak_search_period.empty: return False, None, None, None
-    t_peak = peak_search_period["High"].idxmax()
-    peak_k = float(k_series.loc[t_peak])
-    if peak_k >= 80: return False, None, None, None
+    # 底底高
+    if right_low <= left_low * 0.99: return False, None, None, None, 0
         
-    # 4. 發動日 (Checking the last row of the input stock_df)
+    # 4. 發動日確認 (今天)
     curr_row = stock_df.iloc[-1]
     prev_row = stock_df.iloc[-2]
     curr_open = float(curr_row["Open"])
@@ -202,10 +250,10 @@ def detect_w_bottom_signal(stock_df, k_series, d_series, lookback=60):
     cond_engulf = _is_red_engulf_black(prev_open, prev_close, curr_open, curr_close)
     cond_gap = _is_gap_up_attack(prev_close, prev_high, curr_open, curr_close)
     
-    if not (cond_engulf or cond_gap): return False, None, None, None
-    if curr_close <= right_low: return False, None, None, None
+    if not (cond_engulf or cond_gap): return False, None, None, None, 0
+    if curr_close <= right_low: return False, None, None, None, 0
 
-    return True, t_left, t_right, t_peak
+    return True, t_left, t_right, t_peak, peak_k_val
 
 # --- 策略回測核心函數 ---
 def run_strategy_backtest(
@@ -290,14 +338,15 @@ def run_strategy_backtest(
 
                         # --- 策略判定區 ---
                         if use_w_bottom:
-                            # 🧪 光神腳
+                            # 🧪 光神腳 (Ver 3.1)
                             sub_df = full_ohlc.loc[:date].copy()
-                            w_ok, t_left, t_right, t_peak = detect_w_bottom_signal(sub_df, k_full, d_full, lookback=60)
+                            w_ok, t_left, t_right, t_peak, peak_k = detect_w_bottom_signal(sub_df, k_full, d_full, lookback=60)
                             if w_ok:
                                 is_match = True
                                 detail_info["左腳日期"] = t_left.strftime("%m-%d")
                                 detail_info["右腳日期"] = t_right.strftime("%m-%d")
                                 detail_info["頸線日期"] = t_peak.strftime("%m-%d")
+                                detail_info["頸線K值"] = int(peak_k)
                                 
                                 left_low_p = float(sub_df.loc[t_left, "Low"])
                                 stop_loss_price = left_low_p
@@ -445,7 +494,8 @@ def run_strategy_backtest(
                         if use_w_bottom:
                             record["左腳"] = detail_info.get("左腳日期", "")
                             record["右腳"] = detail_info.get("右腳日期", "")
-                            record["頸線"] = detail_info.get("頸線日期", "")
+                            peak_k = detail_info.get("頸線K值", 0)
+                            record["頸線"] = f"{detail_info.get('頸線日期', '')} (K:{peak_k})"
                         results.append(record)
                         if use_royal: break
                 except: continue
@@ -534,22 +584,19 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                         w_left_date = None
                         w_right_date = None
                         w_peak_date = None
+                        peak_k_val = 0.0
 
                         if len(stock_df) >= 20:
                             k_series, d_series = calculate_kd_series(stock_df)
                             k_val = float(k_series.iloc[-1])
                             d_val = float(d_series.iloc[-1])
 
-                            # 🔥 修正：檢查最近 3 天 (今天, 昨天, 前天)
+                            # 🔥 3-Day Limit Filter
                             for day_offset in range(3):
-                                # 倒數第 1, 2, 3 天
                                 target_idx = len(stock_df) - day_offset
                                 if target_idx < 30: continue
-                                
-                                # 切出該天之前的資料
                                 sub_df = stock_df.iloc[:target_idx]
                                 
-                                # 檢測蓄勢待發
                                 if not is_leg_kick:
                                     kick_ok, trig_dt, t_l, t_c = detect_leg_kick_signal(sub_df, lookback=60, trigger_days=3, kd_threshold=20)
                                     if kick_ok and trig_dt == sub_df.index[-1]:
@@ -558,18 +605,16 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                                         t_low = t_l
                                         t_cross = t_c
 
-                                # 檢測光神腳
                                 if not is_w_bottom:
-                                    w_ok, t_l, t_r, t_p = detect_w_bottom_signal(sub_df, k_series, d_series, lookback=60)
+                                    # 🔥 Ver 3.1 即時篩選
+                                    w_ok, t_l, t_r, t_p, p_k = detect_w_bottom_signal(sub_df, k_series, d_series, lookback=60)
                                     if w_ok:
                                         is_w_bottom = True
                                         w_left_date = t_l
                                         w_right_date = t_r
                                         w_peak_date = t_p
-                                        # 如果找到最近一天的訊號，就可以停止往回找了 (優先顯示最新的)
-                                        # 但如果今天是 False, 昨天是 True，我們會記錄昨天的
+                                        peak_k_val = p_k
                                         break 
-
                         else:
                             if len(stock_df) >= 9: k_val, d_val = calculate_kd_values(stock_df)
 
@@ -604,6 +649,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             "左腳日期": w_left_date.strftime("%Y-%m-%d") if w_left_date else "",
                             "右腳日期": w_right_date.strftime("%Y-%m-%d") if w_right_date else "",
                             "頸線日期": w_peak_date.strftime("%Y-%m-%d") if w_peak_date else "",
+                            "頸線K值": int(peak_k_val)
                         })
                     except: continue
         except: pass
@@ -762,7 +808,7 @@ with st.sidebar:
     elif strategy_mode == "🏹 蓄勢待發 (KD+紅吞)":
         st.info("條件：K<20後金叉，金叉後3日內發動(K>=20, 紅吞黑)。")
     elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<20)":
-        st.info("條件：左腳(K<20)；頸線(波段最高)KD<80；右腳底底高。")
+        st.info("條件：左腳(K<20)；頸線(第一次黑吞)；右腳底底高。")
 
     st.divider()
     st.caption("⚠️ 回測將使用上方「最低成交量」過濾。")
@@ -790,10 +836,10 @@ with st.sidebar:
         st.write(f"**🕒 重啟時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         st.markdown("---")
         st.markdown("""
-            ### Ver 2.8 (3-Day Recency Filter)
-            * **時光回溯**：篩選器現在會檢查 **最近 3 個交易日** 的訊號。
-            * **避免漏接**：即使發動點是昨天或前天，今天依然會被列出 (顯示發動日)。
-            * **核心邏輯**：維持 Ver 2.7 完美結構 (光神腳 & 蓄勢待發)。
+            ### Ver 3.1 (Neckline K-Level Visible)
+            * **頸線定義**：波段第一個黑吞紅即鎖定為頸線。
+            * **移除濾網**：不再強制 K<80，改為顯示頸線 KD 值供判斷。
+            * **時效控制**：維持發動訊號 3 天內有效。
             """)
 
 # 主畫面 - 回測報告
@@ -944,8 +990,17 @@ if st.session_state["master_df"] is not None:
                 w_left = selected_row.get("左腳日期", "-")
                 w_right = selected_row.get("右腳日期", "-")
                 w_peak = selected_row.get("頸線日期", "-")
+                peak_k = selected_row.get("頸線K值", 0)
+                
                 with w_col1: st.info(f"🦶 左腳落底\n\n**{w_left}**")
-                with w_col2: st.warning(f"⛰️ 頸線(波段高)\n\n**{w_peak}**")
+                
+                # 頸線判斷與顯示
+                peak_text = f"⛰️ 頸線(黑吞)\n\n**{w_peak}**\n\n(K: {peak_k})"
+                if peak_k >= 80:
+                    with w_col2: st.error(peak_text + "\n🔥 過熱")
+                else:
+                    with w_col2: st.warning(peak_text + "\n❄️ 正常")
+                    
                 with w_col3: st.success(f"🦶 右腳確認\n\n**{w_right}**")
 
 else:
