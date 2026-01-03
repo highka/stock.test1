@@ -10,14 +10,14 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 2.0 (W-Bottom + Strict Exit)"
+VER = "ver 2.1a (Smart Exit + AB=CD)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
 LOG_FILE = "traffic_log.csv"
 
 def get_remote_ip():
-    """嘗試取得使用者 IP (針對 Streamlit Cloud)"""
+    """嘗試取得使用者 IP"""
     try:
         from streamlit.web.server.websocket_headers import _get_websocket_headers
         headers = _get_websocket_headers()
@@ -58,25 +58,19 @@ def get_stock_list():
         tse = twstock.twse
         otc = twstock.tpex
         stock_dict = {}
-
         exclude_industries = ["金融保險業", "存託憑證"]
-
         for code, info in tse.items():
-            if info.type == "股票":
-                if info.group not in exclude_industries:
-                    stock_dict[f"{code}.TW"] = {"name": info.name, "code": code, "group": info.group}
-
+            if info.type == "股票" and info.group not in exclude_industries:
+                stock_dict[f"{code}.TW"] = {"name": info.name, "code": code, "group": info.group}
         for code, info in otc.items():
-            if info.type == "股票":
-                if info.group not in exclude_industries:
-                    stock_dict[f"{code}.TWO"] = {"name": info.name, "code": code, "group": info.group}
-
+            if info.type == "股票" and info.group not in exclude_industries:
+                stock_dict[f"{code}.TWO"] = {"name": info.name, "code": code, "group": info.group}
         return stock_dict
     except:
         return {}
 
 def calculate_kd_values(df, n=9):
-    """回傳最後一筆 K, D（舊版簡易用）"""
+    """回傳最後一筆 K, D（簡易用）"""
     try:
         low_min = df["Low"].rolling(window=n).min()
         high_max = df["High"].rolling(window=n).max()
@@ -91,10 +85,7 @@ def calculate_kd_values(df, n=9):
         return 50, 50
 
 def calculate_kd_series(df, n=9):
-    """
-    回傳整條 K / D 序列
-    df 需要至少包含 'High','Low','Close'
-    """
+    """回傳整條 K / D 序列"""
     low_min = df["Low"].rolling(window=n).min()
     high_max = df["High"].rolling(window=n).max()
     rsv = (df["Close"] - low_min) / (high_max - low_min) * 100
@@ -113,26 +104,21 @@ def calculate_kd_series(df, n=9):
     return k_series, d_series
 
 def _is_red_engulf_black(prev_open, prev_close, curr_open, curr_close):
-    """紅吞黑：前一根黑K，當天紅K，且紅K實體包住前一根黑K實體 (嚴格定義：開低走高)"""
+    """紅吞黑 (允許平盤開出)"""
     prev_is_black = prev_close < prev_open
     curr_is_red = curr_close > curr_open
-    engulf = (curr_open < prev_close) and (curr_close > prev_open)
+    engulf = (curr_open <= prev_close) and (curr_close > prev_open)
     return prev_is_black and curr_is_red and engulf
 
 # --- 舊版打腳訊號 (蓄勢待發) ---
 def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=20):
-    if len(stock_df) < max(lookback + 2, 30):
-        return False, None, None, None
-
+    if len(stock_df) < max(lookback + 2, 30): return False, None, None, None
     recent_df = stock_df.tail(lookback).copy()
-    if len(recent_df) < 20:
-        return False, None, None, None
+    if len(recent_df) < 20: return False, None, None, None
 
     k_series, d_series = calculate_kd_series(recent_df)
-
     t1 = k_series[k_series < kd_threshold].last_valid_index()
-    if t1 is None:
-        return False, None, None, None
+    if t1 is None: return False, None, None, None
     oversold_close = float(recent_df.loc[t1, "Close"])
 
     idx_list = list(recent_df.index)
@@ -145,8 +131,7 @@ def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=2
             t_cross = dt
             break
     
-    if t_cross is None:
-        return False, None, t1, None
+    if t_cross is None: return False, None, t1, None
 
     cross_pos = idx_list.index(t_cross)
     end_pos = min(cross_pos + trigger_days, len(idx_list) - 1)
@@ -166,59 +151,61 @@ def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=2
 
     return False, None, t1, t_cross
 
-# --- 🔥 新增：W底淘金 (光神腳) ---
-def detect_w_bottom_signal(stock_df, lookback=60):
+# --- 🔥 光神腳 (嚴格結構版) ---
+def detect_w_bottom_signal(stock_df, k_series, d_series, lookback=60):
     """
-    W底策略:
-    1. 左腳 (Left Leg): 過去 60 天內曾經出現 K < 20。
-    2. 中間高點 (Neckline): 左腳之後的最高點，其 K 值必須 < 80。
-    3. 右腳 (Right Leg): 當天必須是紅吞黑，且收盤價 > 左腳收盤價。
+    光神腳 (W底) - 支援回傳頸線(t_peak)以計算停利目標
     """
-    if len(stock_df) < 30: return False, None, None
+    if len(stock_df) < 30: return False, None, None, None
     
-    recent_df = stock_df.tail(lookback).copy()
-    k_series, d_series = calculate_kd_series(recent_df)
+    valid_idx = stock_df.index.intersection(k_series.index)
+    if len(valid_idx) < 30: return False, None, None, None
     
-    # 1. 尋找左腳 (最近一次 K < 20)
-    potential_left_legs = k_series[k_series < 20]
-    if potential_left_legs.empty:
-        return False, None, None
+    target_k = k_series.loc[valid_idx].tail(lookback)
+    target_price = stock_df.loc[valid_idx].tail(lookback)
     
-    t_left = potential_left_legs.last_valid_index()
-    
-    # 確保左腳不是今天或昨天
-    if t_left == recent_df.index[-1] or t_left == recent_df.index[-2]:
-        return False, None, None
+    # 1. 左腳 (K < 20 且是該區間最低價)
+    k_under_20 = target_k[target_k < 20]
+    if k_under_20.empty: return False, None, None, None
         
-    left_close = float(recent_df.loc[t_left, "Close"])
+    left_leg_candidates = target_price.loc[k_under_20.index]
+    t_left = left_leg_candidates["Low"].idxmin()
     
-    # 2. 檢查中間高點 (Middle Peak)
-    middle_period = recent_df.loc[t_left:].iloc[1:-1]
-    if middle_period.empty: return False, None, None
+    if valid_idx.get_loc(t_left) > len(valid_idx) - 5: return False, None, None, None
+        
+    left_low = float(stock_df.loc[t_left, "Low"])
     
-    t_peak = middle_period["High"].idxmax()
+    # 2. 頸線 (Neckline) - K < 80
+    t_today = valid_idx[-1]
+    structure_mask = (valid_idx > t_left) & (valid_idx < t_today)
+    structure_period = stock_df.loc[structure_mask]
+    if structure_period.empty: return False, None, None, None
+    
+    t_peak = structure_period["High"].idxmax()
     peak_k = float(k_series.loc[t_peak])
     
-    # ✅ 條件: 中間高點的 KD 必須 < 80 (避免V轉過熱)
-    if peak_k >= 80:
-        return False, None, None
+    if peak_k >= 80: return False, None, None, None # 過熱剔除
         
-    # 3. 檢查右腳 (今天)
-    # ✅ 條件 A: 紅吞黑
-    curr_row = recent_df.iloc[-1]
-    prev_row = recent_df.iloc[-2]
+    # 3. 右腳 (Right Leg)
+    right_leg_mask = (valid_idx > t_peak) & (valid_idx < t_today)
+    right_leg_period = stock_df.loc[right_leg_mask]
+    if right_leg_period.empty: return False, None, None, None
+        
+    t_right = right_leg_period["Low"].idxmin()
+    right_low = float(stock_df.loc[t_right, "Low"])
     
-    curr_open, curr_close = float(curr_row["Open"]), float(curr_row["Close"])
-    prev_open, prev_close = float(prev_row["Open"]), float(prev_row["Close"])
+    # 底底高
+    if right_low <= left_low * 0.99: return False, None, None, None
+        
+    # 4. 發動
+    curr_row = stock_df.iloc[-1]
+    curr_open = float(curr_row["Open"])
+    curr_close = float(curr_row["Close"])
     
-    if not _is_red_engulf_black(prev_open, prev_close, curr_open, curr_close):
-        return False, None, None
-        
-    # ✅ 條件 B: 價格墊高 (右腳 > 左腳)
-    if curr_close <= left_close:
-        return False, None, None
-        
-    return True, t_left, t_peak
+    if curr_close <= curr_open: return False, None, None, None
+    if curr_close <= right_low: return False, None, None, None
+
+    return True, t_left, t_right, t_peak
 
 # --- 策略回測核心函數 ---
 def run_strategy_backtest(
@@ -230,29 +217,23 @@ def run_strategy_backtest(
     use_vol,
     use_royal,
     use_leg_kick,
-    use_w_bottom, # W底參數
+    use_w_bottom,
     min_vol_threshold,
 ):
     results = []
     all_tickers = list(stock_dict.keys())
-
     BATCH_SIZE = 50
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
-    OBSERVE_DAYS = 20 
+    OBSERVE_DAYS = 30 # 放寬觀察天數以等待 2倍幅
 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
-
         try:
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False)
             if data.empty: continue
-
             try:
-                df_o = data["Open"]
-                df_c = data["Close"]
-                df_v = data["Volume"]
-                df_l = data["Low"]
-                df_h = data["High"]
+                df_o, df_c = data["Open"], data["Close"]
+                df_v, df_l, df_h = data["Volume"], data["Low"], data["High"]
             except KeyError: continue
 
             if isinstance(df_c, pd.Series):
@@ -274,7 +255,6 @@ def run_strategy_backtest(
                     v_series = df_v[ticker].reindex(c_series.index).dropna()
                     l_series = df_l[ticker].reindex(c_series.index).dropna()
                     h_series = df_h[ticker].reindex(c_series.index).dropna()
-
                     ma200_series = ma200_df[ticker].reindex(c_series.index)
                     ma30_series = ma30_df[ticker].reindex(c_series.index)
                     ma60_series = ma60_df[ticker].reindex(c_series.index)
@@ -288,7 +268,6 @@ def run_strategy_backtest(
                         "Open": o_series, "Close": c_series, "High": h_series, "Low": l_series
                     }).dropna()
 
-                    # 🔥 計算全域 KD (供出場用)
                     k_full, d_full = calculate_kd_series(full_ohlc)
 
                     for date in scan_window:
@@ -306,25 +285,52 @@ def run_strategy_backtest(
 
                         is_match = False
                         detail_info = {} 
+                        
+                        # 定義停損停利參考價
+                        stop_loss_price = 0.0
+                        target_price = 0.0
 
                         # --- 策略判定區 ---
                         if use_w_bottom:
-                            # 🧪 光神腳策略 (原 W底)
+                            # 🧪 光神腳
                             sub_df = full_ohlc.loc[:date].copy()
-                            w_ok, t_left, t_peak = detect_w_bottom_signal(sub_df, lookback=60)
+                            w_ok, t_left, t_right, t_peak = detect_w_bottom_signal(sub_df, k_full, d_full, lookback=60)
                             if w_ok:
                                 is_match = True
                                 detail_info["左腳日期"] = t_left.strftime("%m-%d")
-                                detail_info["高點日期"] = t_peak.strftime("%m-%d")
+                                detail_info["右腳日期"] = t_right.strftime("%m-%d")
+                                
+                                # 設定出場條件
+                                # 停損: 左腳低點
+                                left_low_p = float(sub_df.loc[t_left, "Low"])
+                                stop_loss_price = left_low_p
+                                
+                                # 停利: 2倍 A波 (A波 = 頸線高 - 左腳低)
+                                neck_high_p = float(sub_df.loc[t_peak, "High"])
+                                amplitude = neck_high_p - left_low_p
+                                target_price = close_p + (2 * amplitude)
 
                         elif use_leg_kick:
-                            # 🏹 蓄勢待發策略 (原 打腳)
+                            # 🏹 蓄勢待發
                             sub_df = full_ohlc.loc[:date].copy()
                             ok, trig_dt, t_low, t_cross = detect_leg_kick_signal(sub_df, lookback=60, trigger_days=3, kd_threshold=20)
                             if ok and trig_dt == date:
                                 is_match = True
                                 detail_info["KD低點"] = t_low.strftime("%m-%d") if t_low else ""
                                 detail_info["KD金叉"] = t_cross.strftime("%m-%d") if t_cross else ""
+                                
+                                # 設定出場條件
+                                # 停損: 左腳低點 (K<20那天的Low)
+                                # 注意: sub_df 可能沒有 t_low 的 Low 資訊(如果它在lookback外), 但通常都在
+                                try:
+                                    left_low_p = float(sub_df.loc[t_low, "Low"])
+                                except:
+                                    left_low_p = float(sub_df.loc[t_low, "Close"]) # Fallback
+                                stop_loss_price = left_low_p
+                                
+                                # 停利: 2倍 A波 (這裡定義 A波 = 發動價 - 左腳低)
+                                amplitude = close_p - left_low_p
+                                target_price = close_p + (2 * amplitude)
 
                         elif use_royal:
                             ma30_val = float(ma30_series.iloc[idx])
@@ -332,7 +338,6 @@ def run_strategy_backtest(
                             if (close_p > ma30_val) and (ma30_val > ma60_val) and (ma60_val > ma200_val):
                                 is_match = True
                         else:
-                            # 其他一般策略
                             low_p = float(l_series.iloc[idx])
                             ma_val_20ago = float(ma200_series.iloc[idx - 20])
                             if use_trend_up and (ma200_val <= ma_val_20ago): continue
@@ -354,18 +359,16 @@ def run_strategy_backtest(
 
                         if not is_match: continue
 
-                        # ---- 命中後：計算績效 (出場邏輯區) ----
+                        # ---- 出場邏輯 (ver 2.1a) ----
                         month_str = date.strftime("%m月")
                         days_after_signal = total_len - 1 - idx
                         final_profit_pct = 0.0
                         result_status = "觀察中"
                         is_watching = False
-
-                        if days_after_signal < 1:
-                            is_watching = True
+                        if days_after_signal < 1: is_watching = True
                         
-                        # A. Royal 策略出場
                         elif use_royal:
+                            # Royal 策略維持原樣 (因為邏輯不同)
                             is_watching = True
                             current_price = float(c_series.iloc[-1])
                             final_profit_pct = (current_price - close_p) / close_p * 100
@@ -391,45 +394,51 @@ def run_strategy_backtest(
                                     final_profit_pct = (end_close - close_p) / close_p * 100
                                     result_status = "Win (期滿獲利)" if final_profit_pct > 0 else "Loss (期滿虧損)"
                                     is_watching = False
-                        
-                        # B. ✅ 實戰出場 (KD<80死叉 或 黑吞紅) - 適用於 光神腳 / 蓄勢待發 / 寶藏
                         else:
-                            MAX_HOLD_DAYS = 20 
+                            # ✅ 蓄勢待發 & 光神腳 & 其他：新版停利停損
+                            # 1. 停損: 收盤 < 左腳低 (stop_loss_price)
+                            # 2. 停利 A: 2倍幅 (High >= target_price)
+                            # 3. 停利 B: KD > 80 死叉
+                            
+                            # 如果是通用策略沒設 stop_loss_price，預設一個 (例如 MA200 * 0.95)
+                            if stop_loss_price == 0: stop_loss_price = ma200_val * 0.95
+                            if target_price == 0: target_price = close_p * 1.15
+
+                            MAX_HOLD_DAYS = 30 # 稍微拉長給波段跑
                             check_days = min(days_after_signal, MAX_HOLD_DAYS)
                             is_watching = True
                             
                             for d in range(1, check_days + 1):
                                 curr_idx = idx + d
                                 if curr_idx >= len(c_series): break
-                                
                                 curr_c = float(c_series.iloc[curr_idx])
-                                curr_o = float(o_series.iloc[curr_idx])
-                                prev_idx = curr_idx - 1
-                                prev_c = float(c_series.iloc[prev_idx])
-                                prev_o = float(o_series.iloc[prev_idx])
-                                
+                                curr_h = float(h_series.iloc[curr_idx]) # 用最高價判斷是否達標
                                 curr_k = float(k_full.iloc[curr_idx])
                                 curr_d = float(d_full.iloc[curr_idx])
-                                prev_k = float(k_full.iloc[prev_idx])
-                                prev_d = float(d_full.iloc[prev_idx])
+                                prev_k = float(k_full.iloc[curr_idx - 1])
+                                prev_d = float(d_full.iloc[curr_idx - 1])
                                 
-                                # 🛑 出場條件 1: KD < 80 且 死叉 (反彈無力)
-                                is_dead_cross = (prev_k >= prev_d) and (curr_k < curr_d)
-                                cond1_weak_kd = is_dead_cross and (curr_k < 80)
-                                
-                                # 🛑 出場條件 2: 黑吞紅 (高檔反轉黑吞)
-                                prev_is_red = prev_c > prev_o
-                                curr_is_black = curr_c < curr_o
-                                is_engulf = (curr_o >= prev_c) and (curr_c <= prev_o)
-                                cond2_bearish = prev_is_red and curr_is_black and is_engulf
-                                
-                                if cond1_weak_kd or cond2_bearish:
+                                # 1. 停損: 收盤破左腳
+                                if curr_c < stop_loss_price:
                                     final_profit_pct = (curr_c - close_p) / close_p * 100
                                     is_watching = False
-                                    if cond1_weak_kd:
-                                        result_status = f"{'Win' if final_profit_pct > 0 else 'Loss'} (KD死叉)"
-                                    else:
-                                        result_status = f"{'Win' if final_profit_pct > 0 else 'Loss'} (黑吞紅)"
+                                    result_status = "Loss (破左腳) 🛑"
+                                    break
+                                
+                                # 2. 停利 A: 2倍 A波達標
+                                if curr_h >= target_price:
+                                    # 達標以目標價計算獲利 (假設掛單成交)
+                                    final_profit_pct = (target_price - close_p) / close_p * 100
+                                    is_watching = False
+                                    result_status = "Win (達標2倍幅) 🎯"
+                                    break
+                                    
+                                # 3. 停利 B: KD > 80 死叉
+                                # 昨 K > 80 且 昨 K>=D, 今 K<D
+                                if (prev_k > 80) and (prev_k >= prev_d) and (curr_k < curr_d):
+                                    final_profit_pct = (curr_c - close_p) / close_p * 100
+                                    is_watching = False
+                                    result_status = "Win (KD>80死叉) 📉"
                                     break
                             
                             if is_watching:
@@ -453,26 +462,22 @@ def run_strategy_backtest(
                             "損益(%)": round(final_profit_pct, 2),
                             "結果": "觀察中" if is_watching else result_status,
                         }
-                        # 紀錄額外資訊
                         if use_leg_kick:
                             record["KD低點"] = detail_info.get("KD低點", "")
                             record["KD金叉"] = detail_info.get("KD金叉", "")
                         if use_w_bottom:
                             record["左腳"] = detail_info.get("左腳日期", "")
-                            record["中高"] = detail_info.get("高點日期", "")
-                        
+                            record["右腳"] = detail_info.get("右腳日期", "")
                         results.append(record)
                         if use_royal: break
-
                 except: continue
         except: pass
-
         progress = (i + 1) / total_batches
         progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
 
     cols = ["月份", "代號", "名稱", "產業", "訊號日期", "訊號價", "損益(%)", "結果"]
     if use_leg_kick: cols.extend(["KD低點", "KD金叉"]) 
-    if use_w_bottom: cols.extend(["左腳", "中高"])
+    if use_w_bottom: cols.extend(["左腳", "右腳"])
     if not results: return pd.DataFrame(columns=cols)
     return pd.DataFrame(results)
 
@@ -503,7 +508,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                 ma200_df = df_c.rolling(window=200).mean()
                 ma30_df = df_c.rolling(window=30).mean()
                 ma60_df = df_c.rolling(window=60).mean()
-
                 last_price_series = df_c.iloc[-1]
                 last_ma200_series = ma200_df.iloc[-1]
                 last_ma30_series = ma30_df.iloc[-1]
@@ -513,7 +517,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                 prev_vol_series = df_v.iloc[-2]
                 recent_close_df = df_c.iloc[-8:]
                 recent_ma200_df = ma200_df.iloc[-8:]
-
                 current_market_date = df_c.index[-1]
 
                 for ticker in df_c.columns:
@@ -549,30 +552,26 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                         leg_kick_date = None
                         t_low = None
                         t_cross = None
-                        
-                        # W 底變數
                         is_w_bottom = False
                         w_left_date = None
-                        w_peak_date = None
+                        w_right_date = None
 
                         if len(stock_df) >= 20:
                             k_series, d_series = calculate_kd_series(stock_df)
                             k_val = float(k_series.iloc[-1])
                             d_val = float(d_series.iloc[-1])
 
-                            # 1. 蓄勢待發 (原打腳)
                             is_leg_kick, leg_kick_date, t_low, t_cross = detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=20)
                             if is_leg_kick:
                                 day_diff = (current_market_date - leg_kick_date).days
                                 if day_diff > 5: is_leg_kick = False
 
-                            # 2. 🔥 光神腳 (原W底)
-                            w_ok, t_left, t_peak = detect_w_bottom_signal(stock_df, lookback=60)
+                            # 🔥 光神腳 (Ver 2.4 嚴格結構版)
+                            w_ok, t_left, t_right, t_peak = detect_w_bottom_signal(stock_df, k_series, d_series, lookback=60)
                             if w_ok:
                                 is_w_bottom = True
                                 w_left_date = t_left
-                                w_peak_date = t_peak
-
+                                w_right_date = t_right
                         else:
                             if len(stock_df) >= 9: k_val, d_val = calculate_kd_values(stock_df)
 
@@ -605,7 +604,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             "KD金叉": t_cross.strftime("%Y-%m-%d") if t_cross else "",
                             "光神腳": is_w_bottom,
                             "左腳日期": w_left_date.strftime("%Y-%m-%d") if w_left_date else "",
-                            "中高日期": w_peak_date.strftime("%Y-%m-%d") if w_peak_date else "",
+                            "右腳日期": w_right_date.strftime("%Y-%m-%d") if w_right_date else "",
                         })
                     except: continue
         except: pass
@@ -715,7 +714,7 @@ with st.sidebar:
     bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 5.0, 2.5, step=0.1)
     min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
     st.subheader("策略選擇")
-    strategy_mode = st.radio("選擇篩選策略：", ("🛡️ 生命線保衛戰 (反彈/支撐)", "🔥 起死回生 (Da來守住)", "🐎 多頭馬車發動 (多頭排列)", "🏹 蓄勢待發 (KD+紅吞)", "⚡ 光神腳 (紅吞+左腳KD<80)"))
+    strategy_mode = st.radio("選擇篩選策略：", ("🛡️ 生命線保衛戰 (反彈/支撐)", "🔥 起死回生 (Da來守住)", "🐎 多頭馬車發動 (多頭排列)", "🏹 蓄勢待發 (KD+紅吞)", "⚡ 光神腳 (紅吞+左腳KD<20)"))
     st.caption("細部條件：")
     filter_trend_up = False
     filter_trend_down = False
@@ -736,8 +735,8 @@ with st.sidebar:
         filter_vol_double = st.checkbox("出量確認", value=False)
     elif strategy_mode == "🏹 蓄勢待發 (KD+紅吞)":
         st.info("條件：K<20後金叉，金叉後3日內發動(K>=20, 紅吞黑)。")
-    elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)":
-        st.info("條件：左腳(K<20)與右腳(今日)之間的高點，KD<80；今日紅吞黑且底底高。")
+    elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<20)":
+        st.info("條件：左腳(K<20)與右腳(波段低點)底底高；頸線KD<80(防V轉)。")
 
     st.divider()
     st.caption("⚠️ 回測將使用上方「最低成交量」過濾。")
@@ -748,7 +747,7 @@ with st.sidebar:
         use_treasure_param = (strategy_mode == "🔥 起死回生 (Da來守住)")
         use_royal_param = (strategy_mode == "🐎 多頭馬車發動 (多頭排列)")
         use_legkick_param = (strategy_mode == "🏹 蓄勢待發 (KD+紅吞)")
-        use_w_bottom_param = (strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)")
+        use_w_bottom_param = (strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<20)")
 
         bt_df = run_strategy_backtest(
             stock_dict, bt_progress, mode=strategy_mode,
@@ -765,9 +764,11 @@ with st.sidebar:
         st.write(f"**🕒 重啟時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         st.markdown("---")
         st.markdown("""
-            ### Ver 2.0 (W-Bottom + Strict Exit)
-            * **策略更名**：原打腳改為「🏹 蓄勢待發」；原W底改為「⚡ 光神腳」。
-            * **實戰回測**：全策略皆已導入逐日出場檢查 (KD死叉 / 黑吞紅)。
+            ### Ver 2.1a (Smart Exit + AB=CD)
+            * **策略升級**：光神腳 & 蓄勢待發 導入智能出場。
+            * **停損**：收盤跌破左腳低點 (嚴格執行)。
+            * **停利 A**：滿足 2倍波段漲幅 (AB=CD)。
+            * **停利 B**：高檔 (K>80) 出現 KD 死亡交叉。
             """)
 
 # 主畫面 - 回測報告
@@ -779,7 +780,7 @@ if st.session_state["backtest_result"] is not None:
         if strategy_mode == "🔥 起死回生 (Da來守住)": s_name = "🔥 起死回生"
         elif strategy_mode == "🐎 多頭馬車發動 (多頭排列)": s_name = "🐎 多頭馬車發動"
         elif strategy_mode == "🏹 蓄勢待發 (KD+紅吞)": s_name = "🏹 蓄勢待發"
-        elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)": s_name = "⚡ 光神腳"
+        elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<20)": s_name = "⚡ 光神腳"
 
     st.subheader(f"🧪 策略回測報告：{s_name}")
     if "結果" in bt_df.columns:
@@ -840,7 +841,7 @@ if st.session_state["master_df"] is not None:
         df = df[df["皇冠特選"] == True] if "皇冠特選" in df.columns else df.iloc[0:0]
     elif strategy_mode == "🏹 蓄勢待發 (KD+紅吞)":
         df = df[df["蓄勢待發"] == True] if "蓄勢待發" in df.columns else df.iloc[0:0]
-    elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)":
+    elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<20)":
         df = df[df["光神腳"] == True] if "光神腳" in df.columns else df.iloc[0:0]
     else:
         df = df[df["abs_bias"] <= bias_threshold]
@@ -885,11 +886,6 @@ if st.session_state["master_df"] is not None:
             selected_row = df[df["選股標籤"] == selected_stock_label].iloc[0]
             plot_stock_chart(selected_row["完整代號"], selected_row["名稱"])
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric("收盤價", f"{selected_row['收盤價']:.2f}")
-            c2.metric("成交量", f"{selected_row['成交量(張)']} 張")
-            c3.metric("KD", selected_row["KD值"])
-
             # ✅ 在詳細頁揭露隱藏資訊
             if strategy_mode == "🏹 蓄勢待發 (KD+紅吞)":
                 st.markdown("---")
@@ -900,14 +896,14 @@ if st.session_state["master_df"] is not None:
                 with k_col1: st.info(f"📉 KD落底日\n\n**{low_date}**")
                 with k_col3: st.success(f"🚀 發動攻擊日\n\n**{kick_date}**")
             
-            elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)":
+            elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<20)":
                 st.markdown("---")
                 st.caption("⚡ 光神腳策略數據:")
                 w_col1, w_col2 = st.columns(2)
                 w_left = selected_row.get("左腳日期", "-")
-                w_peak = selected_row.get("中高日期", "-")
+                w_right = selected_row.get("右腳日期", "-")
                 with w_col1: st.info(f"🦶 左腳落底\n\n**{w_left}**")
-                with w_col2: st.warning(f"⛰️ 頸線高點\n\n**{w_peak}**")
+                with w_col2: st.warning(f"🦶 右腳確認\n\n**{w_right}**")
 
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 下載最新股價」** 按鈕開始挖寶！")
