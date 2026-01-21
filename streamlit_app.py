@@ -4,7 +4,7 @@ import pandas as pd
 import twstock
 import time
 import random
-import requests
+# import requests # 移除，讓 yfinance 自己處理
 import gc  # 引入垃圾回收機制
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
@@ -13,7 +13,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 3.8 (Debug Mode + Connection Check)"
+VER = "ver 3.9 (YFinance Native Fix: Auto-Session)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -74,21 +74,12 @@ def get_stock_list():
     except:
         return {}
 
-def get_req_session():
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Connection": "keep-alive"
-    })
-    return session
-
-# 🔥 新增：連線測試函式
+# 🔥 修改：移除自訂 Session，讓 yfinance 內部自己處理
 def test_connection():
-    session = get_req_session()
     try:
         test_ticker = "2330.TW"
-        data = yf.download(test_ticker, period="5d", progress=False, session=session, threads=False)
+        # 移除 session 參數，保留 threads=False 防當機
+        data = yf.download(test_ticker, period="5d", progress=False, threads=False)
         if not data.empty:
             return True, f"✅ 連線成功！成功抓取 {test_ticker} (資料筆數: {len(data)})"
         else:
@@ -260,18 +251,19 @@ def run_strategy_backtest(
     use_w_bottom,
     min_vol_threshold,
 ):
-    # 回測函式維持原樣，但加上 threads=False 確保穩定
     results = []
     all_tickers = list(stock_dict.keys())
+    # 🔥 穩定模式：批次 15
     BATCH_SIZE = 15
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     OBSERVE_DAYS = 30 
-    session = get_req_session()
+    # 移除 session
 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, session=session, threads=False)
+            # 🔥 移除 session 參數，保留 threads=False
+            data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
             if data.empty: continue
             try:
                 df_o, df_c = data["Open"], data["Close"]
@@ -499,32 +491,30 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
     if not stock_dict: return pd.DataFrame()
     all_tickers = list(stock_dict.keys())
     
-    # 🔥 穩定模式：極小批次 + 單線程
+    # 🔥 穩定模式
     BATCH_SIZE = 15 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
     
-    # Debug 日誌初始化
     debug_logs = []
     log_area = None
     if debug_container:
         log_area = debug_container.empty()
     
-    session = get_req_session()
+    # 移除 session
 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 🔥 穩定模式：threads=False
-            data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, session=session, threads=False)
+            # 🔥 移除 session, 保留 threads=False
+            data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
             
             # Debug 訊息
             msg = f"Batch {i+1}: 嘗試下載 {len(batch)} 檔"
             if data.empty:
                 msg += " ❌ (Empty Response)"
-                # 自動重試
-                time.sleep(3)
-                data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, session=session, threads=False)
+                time.sleep(5) # 失敗後休息久一點
+                data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
                 if data.empty:
                     msg += " -> 重試失敗"
                 else:
@@ -534,7 +524,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
             
             debug_logs.append(msg)
             if log_area:
-                log_area.text("\n".join(debug_logs[-10:])) # 只顯示最後 10 行
+                log_area.text("\n".join(debug_logs[-10:]))
 
             if not data.empty:
                 try:
@@ -674,14 +664,13 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
         current_progress = (i + 1) / total_batches
         progress_bar.progress(current_progress, text=f"系統正在努力挖掘寶藏中...({int(current_progress*100)}%)")
         time.sleep(1.5)
-        gc.collect() # 🧹 垃圾回收
+        gc.collect() 
     return pd.DataFrame(raw_data_list)
 
 def plot_stock_chart(ticker, name, points_dict=None):
     try:
-        session = get_req_session()
-        # 🔥 繪圖也要 threads=False
-        df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False, session=session, threads=False)
+        # 🔥 移除 session, 保留 threads=False
+        df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
         df = df[df["Volume"] > 0].dropna()
@@ -765,7 +754,7 @@ with st.sidebar:
             st.success(f"⚡ 已快速載入上次資料 ({st.session_state['last_update']})")
         except Exception as e: st.error(f"讀取快取失敗: {e}")
 
-    # 🔥 側邊欄新增：連線測試按鈕
+    # 🔥 連線測試按鈕
     if st.button("🩺 測試連線 (Check IP)"):
         ok, msg = test_connection()
         if ok: st.success(msg)
@@ -781,7 +770,6 @@ with st.sidebar:
                     <style>@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }</style>
                     <div style="text-align: center;">連線下載中 (Batch=15)...</div>""", unsafe_allow_html=True)
             
-            # 🔥 新增：偵錯日誌區
             debug_container = st.expander("🕵️ 下載詳細日誌 (Debug Log)", expanded=True)
             
             status_text = st.empty()
@@ -868,9 +856,10 @@ with st.sidebar:
         st.write(f"**🕒 重啟時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         st.markdown("---")
         st.markdown("""
-            ### Ver 3.8 (Debug Mode + Connection Check)
-            * **新增**：下載日誌區 (Debug Log)，即時顯示每一批次的下載狀態。
-            * **新增**：連線測試按鈕 (Check IP)，快速確認是否被鎖。
+            ### Ver 3.9 (YFinance Native Fix: Auto-Session)
+            * **修正錯誤**：遵循 Yahoo API 要求，移除自訂 Session 注入。
+            * **恢復原廠**：讓 yfinance 內部機制自行處理反爬蟲。
+            * **保持穩定**：維持單執行緒下載與間隔。
             """)
 
 # 主畫面 - 日常篩選
