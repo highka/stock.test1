@@ -4,8 +4,7 @@ import pandas as pd
 import twstock
 import time
 import random
-# import requests # 移除，讓 yfinance 自己處理
-import gc  # 引入垃圾回收機制
+import gc  # 資源回收
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 import os
@@ -13,7 +12,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 3.9 (YFinance Native Fix: Auto-Session)"
+VER = "ver 2.1a (Final Stable: YF Native + Anti-Block)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -59,6 +58,7 @@ log_traffic()
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_list():
+    """取得台股清單 (排除金融/ETF)"""
     try:
         tse = twstock.twse
         otc = twstock.tpex
@@ -74,11 +74,10 @@ def get_stock_list():
     except:
         return {}
 
-# 🔥 修改：移除自訂 Session，讓 yfinance 內部自己處理
 def test_connection():
     try:
         test_ticker = "2330.TW"
-        # 移除 session 參數，保留 threads=False 防當機
+        # 這裡不設 session，完全交給 YF 內部處理
         data = yf.download(test_ticker, period="5d", progress=False, threads=False)
         if not data.empty:
             return True, f"✅ 連線成功！成功抓取 {test_ticker} (資料筆數: {len(data)})"
@@ -178,6 +177,13 @@ def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=2
     return False, None, t1, t_cross
 
 def detect_w_bottom_signal(stock_df, k_series, d_series, lookback=60):
+    """
+    光神腳 (Ver 2.1a 邏輯):
+    1. 左腳: K<20 區間最低.
+    2. 頸線: 第一個黑吞紅 (顯示K值但不強制<80).
+    3. 右腳: 頸線後回測低點 > 左腳.
+    4. 發動: 紅吞或跳空.
+    """
     if len(stock_df) < 30: return False, None, None, None, 0
     valid_idx = stock_df.index.intersection(k_series.index)
     if len(valid_idx) < 30: return False, None, None, None, 0
@@ -198,6 +204,7 @@ def detect_w_bottom_signal(stock_df, k_series, d_series, lookback=60):
     t_peak = None
     peak_k_val = 0.0
     
+    # 尋找第一個黑吞紅當作頸線
     for i in range(t_left_pos + 1, end_scan_pos):
         curr_dt = valid_idx[i]
         prev_dt = valid_idx[i-1]
@@ -253,16 +260,14 @@ def run_strategy_backtest(
 ):
     results = []
     all_tickers = list(stock_dict.keys())
-    # 🔥 穩定模式：批次 15
+    # 🔥 穩定回測參數 (Batch 15, No threads)
     BATCH_SIZE = 15
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     OBSERVE_DAYS = 30 
-    # 移除 session
 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 🔥 移除 session 參數，保留 threads=False
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
             if data.empty: continue
             try:
@@ -413,10 +418,7 @@ def run_strategy_backtest(
                                     result_status = "Win (期滿獲利)" if final_profit_pct > 0 else "Loss (期滿虧損)"
                                     is_watching = False
                         else:
-                            if stop_loss_price == 0: stop_loss_price = ma200_val * 0.95
-                            if target_price == 0: target_price = close_p * 1.15
-
-                            MAX_HOLD_DAYS = 30
+                            MAX_HOLD_DAYS = 30 
                             check_days = min(days_after_signal, MAX_HOLD_DAYS)
                             is_watching = True
                             
@@ -488,10 +490,13 @@ def run_strategy_backtest(
     return pd.DataFrame(raw_data_list)
 
 def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
-    if not stock_dict: return pd.DataFrame()
+    if not stock_dict: 
+        st.error("❌ 無法取得股票清單 (twstock 阻擋或失敗)！")
+        return pd.DataFrame()
+        
     all_tickers = list(stock_dict.keys())
     
-    # 🔥 穩定模式
+    # 🔥 穩定模式：Batch 15
     BATCH_SIZE = 15 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
@@ -501,19 +506,20 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
     if debug_container:
         log_area = debug_container.empty()
     
-    # 移除 session
+    # 不使用 session
 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 🔥 移除 session, 保留 threads=False
+            # 🔥 threads=False 是關鍵
             data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
             
-            # Debug 訊息
+            # Debug
             msg = f"Batch {i+1}: 嘗試下載 {len(batch)} 檔"
             if data.empty:
                 msg += " ❌ (Empty Response)"
-                time.sleep(5) # 失敗後休息久一點
+                # 重試機制
+                time.sleep(5) 
                 data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
                 if data.empty:
                     msg += " -> 重試失敗"
@@ -669,7 +675,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
 
 def plot_stock_chart(ticker, name, points_dict=None):
     try:
-        # 🔥 移除 session, 保留 threads=False
+        # 🔥 threads=False 避免資源耗盡
         df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
@@ -856,10 +862,10 @@ with st.sidebar:
         st.write(f"**🕒 重啟時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         st.markdown("---")
         st.markdown("""
-            ### Ver 3.9 (YFinance Native Fix: Auto-Session)
-            * **修正錯誤**：遵循 Yahoo API 要求，移除自訂 Session 注入。
-            * **恢復原廠**：讓 yfinance 內部機制自行處理反爬蟲。
-            * **保持穩定**：維持單執行緒下載與間隔。
+            ### Ver 2.1a (Final Stable)
+            * **核心修復**：移除自訂 Session，強制單執行緒下載，解決 YF 連線問題。
+            * **除錯優化**：新增 twstock 檢查與連線測試按鈕。
+            * **策略邏輯**：光神腳 Ver 3.1 (頸線黑吞/3日時效/K值顯示)。
             """)
 
 # 主畫面 - 日常篩選
