@@ -12,7 +12,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 2.0 (Batch=50 Speed Up)"
+VER = "ver 2.1b (Speed Optimized)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -167,13 +167,6 @@ def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=2
 
 # 🔥 Logic 2.0: 光神腳 (原版定義)
 def detect_w_bottom_signal(stock_df, k_series, d_series, lookback=60):
-    """
-    光神腳 (Ver 2.0 邏輯):
-    1. 左腳: K<20.
-    2. 頸線: 波段最高點 (非黑吞), 且 K<80 (嚴格濾網).
-    3. 右腳: 底底高.
-    4. 發動: 必須是紅吞黑.
-    """
     if len(stock_df) < 30: return False, None, None
     valid_idx = stock_df.index.intersection(k_series.index)
     if len(valid_idx) < 30: return False, None, None
@@ -224,15 +217,15 @@ def run_strategy_backtest(
     results = []
     all_tickers = list(stock_dict.keys())
     
-    # 🔥 批次改為 50
-    BATCH_SIZE = 50
+    # 🔥 提速關鍵：批次加大至 100
+    BATCH_SIZE = 100
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     OBSERVE_DAYS = 30 
 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # System: threads=False
+            # System: threads=False 讓系統穩定循序下載
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
             if data.empty: continue
             try:
@@ -447,10 +440,10 @@ def run_strategy_backtest(
         except: pass
         progress = (i + 1) / total_batches
         progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
-        # System: Stable
-        time.sleep(1.5)
+        # 🔥 提速關鍵：縮短休息時間
+        time.sleep(0.2)
         gc.collect() 
-    return pd.DataFrame(raw_data_list)
+    return pd.DataFrame(results)
 
 def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
     if not stock_dict: 
@@ -459,8 +452,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
         
     all_tickers = list(stock_dict.keys())
     
-    # 🔥 批次改為 50
-    BATCH_SIZE = 50 
+    # 🔥 提速關鍵：Batch 100
+    BATCH_SIZE = 100 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
     
@@ -468,18 +461,17 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
     log_area = None
     if debug_container:
         log_area = debug_container.empty()
-    
+
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # System: threads=False
+            # 🔥 System: threads=False
             data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
             
-            # Debug
             msg = f"Batch {i+1}: 嘗試下載 {len(batch)} 檔"
             if data.empty:
                 msg += " ❌ (Empty Response)"
-                time.sleep(5) 
+                time.sleep(3) 
                 data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
                 if data.empty:
                     msg += " -> 重試失敗"
@@ -614,12 +606,12 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
             
         current_progress = (i + 1) / total_batches
         progress_bar.progress(current_progress, text=f"系統正在努力挖掘寶藏中...({int(current_progress*100)}%)")
-        # System: Stable
-        time.sleep(1.5)
+        # 🔥 提速關鍵：縮短休息時間
+        time.sleep(0.2)
         gc.collect() 
     return pd.DataFrame(raw_data_list)
 
-def plot_stock_chart(ticker, name, points_dict=None):
+def plot_stock_chart(ticker, name):
     try:
         # System: threads=False
         df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
@@ -694,7 +686,7 @@ with st.sidebar:
             with placeholder_emoji:
                 st.markdown("""<div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">🎁💰✨</div>
                     <style>@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }</style>
-                    <div style="text-align: center;">連線下載中 (Batch=50)...</div>""", unsafe_allow_html=True)
+                    <div style="text-align: center;">連線下載中 (Batch=100)...</div>""", unsafe_allow_html=True)
             
             # System: Debug Log
             debug_container = st.expander("🕵️ 下載詳細日誌 (Debug Log)", expanded=True)
@@ -784,8 +776,9 @@ with st.sidebar:
         st.markdown("---")
         st.markdown("""
             ### Ver 2.0 (Original Logic + Stable System)
-            * **還原邏輯**：嚴格紅吞黑 / 頸線K<80 / 頸線為波段高點。
-            * **系統升級**：使用 Ver 2.1a 的連線引擎 (Threads=False) 防止當機。
+            * **邏輯**：還原 Ver 2.0 基礎邏輯。
+            * **系統**：使用 Ver 2.1a 的連線引擎 (Threads=False) 防止當機。
+            * **速度**：Batch size 加大至 100，縮短休息時間以提速。
             """)
 
 # 主畫面 - 日常篩選
