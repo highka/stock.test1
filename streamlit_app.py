@@ -12,7 +12,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 2.2a"
+VER = "ver 2.2b"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -124,7 +124,7 @@ def detect_ma87_284_cross(ma87_series, ma284_series, current_idx):
     if current_idx < 284:
         return False, 0
         
-    for offset in range(10):
+    for offset in range(10): # 確認 10 天內發生
         check_idx = current_idx - offset
         prev_idx = check_idx - 1
         
@@ -672,7 +672,8 @@ def plot_stock_chart(ticker, name, strategy_mode=""):
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=plot_df["DateStr"], y=plot_df["Close"], mode="lines", name="收盤價", line=dict(color="#00CC96", width=2.5)))
         
-        if "87MA" in strategy_mode:
+        # --- 繪圖區也同步改為對應「黃金長期勝率滿分」 ---
+        if strategy_mode == "🎯 黃金長期勝率滿分":
             fig.add_trace(go.Scatter(x=plot_df["DateStr"], y=plot_df["87MA"], mode="lines", name="87MA (中期)", line=dict(color="#FF1493", width=2)))
             fig.add_trace(go.Scatter(x=plot_df["DateStr"], y=plot_df["284MA"], mode="lines", name="284MA (長線)", line=dict(color="#000000", width=3)))
         else:
@@ -768,13 +769,15 @@ with st.sidebar:
     bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 5.0, 2.5, step=0.1)
     min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
     st.subheader("策略選擇")
+    
+    # --- 修改點：策略名稱全部統一為「🎯 黃金長期勝率滿分」 ---
     strategy_mode = st.radio("選擇篩選策略：", (
         "🛡️ 生命線保衛戰 (反彈/支撐)", 
         "🔥 起死回生 (Da來守住)", 
         "🐎 多頭馬車發動 (多頭排列)", 
         "🏹 蓄勢待發 (KD+紅吞)", 
         "⚡ 光神腳 (紅吞+左腳KD<80)",
-        "📈 87MA 金叉 284MA (10日內波段多頭)" 
+        "🎯 黃金長期勝率滿分"  
     ))
     st.caption("細部條件：")
     filter_trend_up = False
@@ -798,7 +801,7 @@ with st.sidebar:
         st.info("條件：K<20後金叉，金叉後3日內發動(K>=20, 紅吞黑)。")
     elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)":
         st.info("條件：左腳(K<20)；頸線(波段高點) K<80；紅吞黑發動。")
-    elif strategy_mode == "📈 87MA 金叉 284MA (10日內波段多頭)":
+    elif strategy_mode == "🎯 黃金長期勝率滿分":
         st.info("條件：87 日均線由下往上穿越 284 日長線，且發生在近 10 個交易日內，長線走多確認。")
 
     st.divider()
@@ -811,7 +814,9 @@ with st.sidebar:
         use_royal_param = (strategy_mode == "🐎 多頭馬車發動 (多頭排列)")
         use_legkick_param = (strategy_mode == "🏹 蓄勢待發 (KD+紅吞)")
         use_w_bottom_param = (strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)")
-        use_ma87_284_param = (strategy_mode == "📈 87MA 金叉 284MA (10日內波段多頭)")
+        
+        # --- 策略對應變數 ---
+        use_ma87_284_param = (strategy_mode == "🎯 黃金長期勝率滿分")
 
         bt_df = run_strategy_backtest(
             stock_dict, bt_progress, mode=strategy_mode,
@@ -832,15 +837,10 @@ with st.sidebar:
             st.write(f"**🕒 系統時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
             st.markdown("---")
             st.markdown("""
-                ### Ver 2.2a
-                * **介面優化**：標題極簡化，隱藏過多技術說明。
-                * **日誌上鎖**：系統開發日誌加入密碼保護機制，維護介面清爽。
-                * **新增策略**：87MA 金叉 284MA (近 5 日有效)，自動畫出專屬長週期均線圖。
+                ### Ver 2.2b
+                * **修復Bug**：解決「長線多頭」策略名稱在判斷式與UI介面不一致，導致篩選為空的嚴重問題。
+                * **名稱修改**：正式更名為「🎯 黃金長期勝率滿分」。
                 * **資料擴展**：下載範圍調整至 2 年，以滿足 284MA 之計算門檻。
-                ### Ver 2.1b & 2.1a & 2.0
-                * **系統修復**：移除自訂 Session，強制單執行緒下載，解決 YF 連線崩潰問題。
-                * **效能優化**：Batch size 調整為 50，加入自動垃圾回收 (gc.collect)。
-                * **策略還原**：光神腳保留頸線波段高點、嚴格 K<80 濾網、嚴格紅吞黑發動。
                 """)
         elif log_pwd != "":
             st.error("密碼錯誤")
@@ -862,7 +862,9 @@ if st.session_state["master_df"] is not None:
         df = df[df["蓄勢待發"] == True] if "蓄勢待發" in df.columns else df.iloc[0:0]
     elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)":
         df = df[df["光神腳"] == True] if "光神腳" in df.columns else df.iloc[0:0]
-    elif strategy_mode == "📈 87MA 金叉 284MA (5日內波段多頭)":
+        
+    # --- 這裡就是原本的大蟲！之前寫「5日內」，導致和上面的名稱對不起來 ---
+    elif strategy_mode == "🎯 黃金長期勝率滿分":
         df = df[df["長線多頭"] == True] if "長線多頭" in df.columns else df.iloc[0:0]
     else:
         df = df[df["abs_bias"] <= bias_threshold]
@@ -885,7 +887,7 @@ if st.session_state["master_df"] is not None:
         fixed_display_cols = ["代號", "名稱", "產業", "收盤價", "生命線", "乖離率(%)", "位置", "KD值", "成交量(張)"]
         if strategy_mode == "🐎 多頭馬車發動 (多頭排列)":
             fixed_display_cols = ["代號", "名稱", "產業", "收盤價", "MA30", "MA60", "生命線", "KD值", "成交量(張)"]
-        elif "87MA" in strategy_mode:
+        elif strategy_mode == "🎯 黃金長期勝率滿分":
             fixed_display_cols = ["代號", "名稱", "產業", "收盤價", "金叉日期", "乖離率(%)", "位置", "成交量(張)"]
 
         for col in fixed_display_cols:
@@ -932,7 +934,7 @@ if st.session_state["master_df"] is not None:
                 with w_col1: st.info(f"🦶 左腳落底\n\n**{w_left}**")
                 with w_col2: st.warning(f"⛰️ 頸線高點\n\n**{w_peak}**")
             
-            elif "87MA" in strategy_mode:
+            elif strategy_mode == "🎯 黃金長期勝率滿分":
                 st.markdown("---")
                 cross_date = selected_row.get("金叉日期", "-")
                 st.success(f"🔥 長線多頭確認！\n\n**87MA 突破 284MA 金叉日：{cross_date}**")
