@@ -12,14 +12,14 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 2.1b (Speed Optimized)"
+VER = "ver 2.2a"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
 LOG_FILE = "traffic_log.csv"
 
 def get_remote_ip():
-    """嘗試取得使用者 IP (兼容新舊版 Streamlit)"""
+    """嘗試取得使用者 IP"""
     try:
         if hasattr(st, "context") and st.context.headers:
             headers = st.context.headers
@@ -73,7 +73,6 @@ def get_stock_list():
     except:
         return {}
 
-# System: 連線測試
 def test_connection():
     try:
         test_ticker = "2330.TW"
@@ -117,14 +116,40 @@ def calculate_kd_series(df, n=9):
     d_series = pd.Series(d_list, index=df.index)
     return k_series, d_series
 
-# Logic 2.0: 嚴格紅吞黑
+# --- 新增：87MA 金叉 284MA 偵測 (5日內) ---
+def detect_ma87_284_cross(ma87_series, ma284_series, current_idx):
+    """
+    偵測 87MA 是否在近 5 個交易日內由下往上穿越 284MA
+    """
+    if current_idx < 284:
+        return False, 0
+        
+    for offset in range(5):
+        check_idx = current_idx - offset
+        prev_idx = check_idx - 1
+        
+        if prev_idx < 0:
+            continue
+            
+        curr_87 = ma87_series.iloc[check_idx]
+        curr_284 = ma284_series.iloc[check_idx]
+        prev_87 = ma87_series.iloc[prev_idx]
+        prev_284 = ma284_series.iloc[prev_idx]
+        
+        if pd.isna(curr_87) or pd.isna(curr_284) or pd.isna(prev_87) or pd.isna(prev_284):
+            continue
+            
+        if (prev_87 <= prev_284) and (curr_87 > curr_284):
+            return True, offset  
+            
+    return False, 0
+
 def _is_red_engulf_black(prev_open, prev_close, curr_open, curr_close):
     prev_is_black = prev_close < prev_open
     curr_is_red = curr_close > curr_open
     engulf = (curr_open <= prev_close) and (curr_close > prev_open)
     return prev_is_black and curr_is_red and engulf
 
-# Logic 2.0: 蓄勢待發
 def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=20):
     if len(stock_df) < max(lookback + 2, 30): return False, None, None, None
     recent_df = stock_df.tail(lookback).copy()
@@ -165,21 +190,18 @@ def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=2
 
     return False, None, t1, t_cross
 
-# 🔥 Logic 2.0: 光神腳 (原版定義)
 def detect_w_bottom_signal(stock_df, k_series, d_series, lookback=60):
     if len(stock_df) < 30: return False, None, None
     valid_idx = stock_df.index.intersection(k_series.index)
     if len(valid_idx) < 30: return False, None, None
     target_k = k_series.loc[valid_idx].tail(lookback)
     
-    # 1. 左腳
     k_under_20 = target_k[target_k < 20]
     if k_under_20.empty: return False, None, None
     t_left = k_under_20.last_valid_index()
     if valid_idx.get_loc(t_left) > len(valid_idx) - 5: return False, None, None
     left_low = float(stock_df.loc[t_left, "Close"]) 
     
-    # 2. 頸線 (簡單最高點)
     t_today = valid_idx[-1]
     structure_mask = (valid_idx > t_left) & (valid_idx < t_today)
     structure_period = stock_df.loc[structure_mask]
@@ -188,10 +210,8 @@ def detect_w_bottom_signal(stock_df, k_series, d_series, lookback=60):
     t_peak = structure_period["High"].idxmax()
     peak_k = float(k_series.loc[t_peak])
     
-    # Logic 2.0 嚴格濾網: K >= 80 直接淘汰
     if peak_k >= 80: return False, None, None
         
-    # 3. 發動 (嚴格紅吞黑)
     curr_row = stock_df.iloc[-1]
     prev_row = stock_df.iloc[-2]
     curr_open, curr_close = float(curr_row["Open"]), float(curr_row["Close"])
@@ -212,21 +232,19 @@ def run_strategy_backtest(
     use_royal,
     use_leg_kick,
     use_w_bottom,
+    use_ma87_284, 
     min_vol_threshold,
 ):
     results = []
     all_tickers = list(stock_dict.keys())
-    
-    # 🔥 提速關鍵：批次加大至 100
-    BATCH_SIZE = 100
+    BATCH_SIZE = 50
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     OBSERVE_DAYS = 30 
 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # System: threads=False 讓系統穩定循序下載
-            data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
+            data = yf.download(batch, period="3y", interval="1d", progress=False, auto_adjust=False, threads=False)
             if data.empty: continue
             try:
                 df_o, df_c = data["Open"], data["Close"]
@@ -243,6 +261,8 @@ def run_strategy_backtest(
             ma200_df = df_c.rolling(window=200).mean()
             ma30_df = df_c.rolling(window=30).mean()
             ma60_df = df_c.rolling(window=60).mean()
+            ma87_df = df_c.rolling(window=87).mean()
+            ma284_df = df_c.rolling(window=284).mean()
             scan_window = df_c.index[-90:]
 
             for ticker in df_c.columns:
@@ -255,6 +275,8 @@ def run_strategy_backtest(
                     ma200_series = ma200_df[ticker].reindex(c_series.index)
                     ma30_series = ma30_df[ticker].reindex(c_series.index)
                     ma60_series = ma60_df[ticker].reindex(c_series.index)
+                    ma87_series = ma87_df[ticker].reindex(c_series.index)
+                    ma284_series = ma284_df[ticker].reindex(c_series.index)
 
                     stock_info = stock_dict.get(ticker, {})
                     stock_name = stock_info.get("name", ticker)
@@ -285,7 +307,16 @@ def run_strategy_backtest(
                         stop_loss_price = 0.0
                         target_price = 0.0
 
-                        if use_w_bottom:
+                        if use_ma87_284:
+                            is_cross, cross_offset = detect_ma87_284_cross(ma87_series, ma284_series, idx)
+                            if is_cross:
+                                is_match = True
+                                cross_date = c_series.index[idx - cross_offset].strftime("%m-%d")
+                                detail_info["金叉日"] = cross_date
+                                stop_loss_price = close_p * 0.90 
+                                target_price = close_p * 1.30
+
+                        elif use_w_bottom:
                             sub_df = full_ohlc.loc[:date].copy()
                             w_ok, t_left, t_peak = detect_w_bottom_signal(sub_df, k_full, d_full, lookback=60)
                             if w_ok:
@@ -373,9 +404,6 @@ def run_strategy_backtest(
                                     result_status = "Win (期滿獲利)" if final_profit_pct > 0 else "Loss (期滿虧損)"
                                     is_watching = False
                         else:
-                            if stop_loss_price == 0: stop_loss_price = ma200_val * 0.95
-                            if target_price == 0: target_price = close_p * 1.15
-
                             MAX_HOLD_DAYS = 30
                             check_days = min(days_after_signal, MAX_HOLD_DAYS)
                             is_watching = True
@@ -393,13 +421,13 @@ def run_strategy_backtest(
                                 if curr_c < stop_loss_price:
                                     final_profit_pct = (curr_c - close_p) / close_p * 100
                                     is_watching = False
-                                    result_status = "Loss (破左腳) 🛑"
+                                    result_status = "Loss (破防守) 🛑"
                                     break
                                 
                                 if curr_h >= target_price:
                                     final_profit_pct = (target_price - close_p) / close_p * 100
                                     is_watching = False
-                                    result_status = "Win (達標2倍幅) 🎯"
+                                    result_status = "Win (達標停利) 🎯"
                                     break
                                     
                                 if (prev_k > 80) and (prev_k >= prev_d) and (curr_k < curr_d):
@@ -434,13 +462,14 @@ def run_strategy_backtest(
                             record["KD金叉"] = detail_info.get("KD金叉", "")
                         if use_w_bottom:
                             record["左腳"] = detail_info.get("左腳日期", "")
+                        if use_ma87_284:
+                            record["金叉日"] = detail_info.get("金叉日", "")
                         results.append(record)
                         if use_royal: break
                 except: continue
         except: pass
         progress = (i + 1) / total_batches
         progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
-        # 🔥 提速關鍵：縮短休息時間
         time.sleep(0.2)
         gc.collect() 
     return pd.DataFrame(results)
@@ -451,9 +480,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
         return pd.DataFrame()
         
     all_tickers = list(stock_dict.keys())
-    
-    # 🔥 提速關鍵：Batch 100
-    BATCH_SIZE = 100 
+    BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
     
@@ -465,14 +492,13 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 🔥 System: threads=False
-            data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
+            data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
             
             msg = f"Batch {i+1}: 嘗試下載 {len(batch)} 檔"
             if data.empty:
                 msg += " ❌ (Empty Response)"
                 time.sleep(3) 
-                data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
+                data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
                 if data.empty:
                     msg += " -> 重試失敗"
                 else:
@@ -500,6 +526,9 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
                 ma200_df = df_c.rolling(window=200).mean()
                 ma30_df = df_c.rolling(window=30).mean()
                 ma60_df = df_c.rolling(window=60).mean()
+                ma87_df = df_c.rolling(window=87).mean()
+                ma284_df = df_c.rolling(window=284).mean()
+                
                 last_price_series = df_c.iloc[-1]
                 last_ma200_series = ma200_df.iloc[-1]
                 last_ma30_series = ma30_df.iloc[-1]
@@ -547,6 +576,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
                         is_w_bottom = False
                         w_left_date = None
                         w_peak_date = None
+                        is_ma87_284 = False
+                        ma87_284_msg = ""
 
                         if len(stock_df) >= 20:
                             k_series, d_series = calculate_kd_series(stock_df)
@@ -558,7 +589,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
                                 day_diff = (current_market_date - leg_kick_date).days
                                 if day_diff > 5: is_leg_kick = False
 
-                            # 🔥 Logic 2.0: 只看最近一天，非 Range(3)
                             w_ok, t_left, t_peak = detect_w_bottom_signal(stock_df, k_series, d_series, lookback=60)
                             if w_ok:
                                 is_w_bottom = True
@@ -566,6 +596,14 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
                                 w_peak_date = t_peak
                         else:
                             if len(stock_df) >= 9: k_val, d_val = calculate_kd_values(stock_df)
+
+                        if len(stock_df) >= 284:
+                            curr_idx = len(stock_df) - 1
+                            cross_ok, offset = detect_ma87_284_cross(ma87_df[ticker].dropna(), ma284_df[ticker].dropna(), curr_idx)
+                            if cross_ok:
+                                is_ma87_284 = True
+                                cross_date_dt = stock_df.index[curr_idx - offset]
+                                ma87_284_msg = cross_date_dt.strftime("%Y-%m-%d")
 
                         bias = ((price - ma200) / ma200) * 100
                         stock_info = stock_dict.get(ticker)
@@ -597,6 +635,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
                             "光神腳": is_w_bottom,
                             "左腳日期": w_left_date.strftime("%Y-%m-%d") if w_left_date else "",
                             "中高日期": w_peak_date.strftime("%Y-%m-%d") if w_peak_date else "",
+                            "長線多頭": is_ma87_284,
+                            "金叉日期": ma87_284_msg,
                         })
                     except: continue
         except Exception as e:
@@ -606,15 +646,13 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
             
         current_progress = (i + 1) / total_batches
         progress_bar.progress(current_progress, text=f"系統正在努力挖掘寶藏中...({int(current_progress*100)}%)")
-        # 🔥 提速關鍵：縮短休息時間
         time.sleep(0.2)
         gc.collect() 
     return pd.DataFrame(raw_data_list)
 
-def plot_stock_chart(ticker, name):
+def plot_stock_chart(ticker, name, strategy_mode=""):
     try:
-        # System: threads=False
-        df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
+        df = yf.download(ticker, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
         df = df[df["Volume"] > 0].dropna()
@@ -625,16 +663,23 @@ def plot_stock_chart(ticker, name):
         df["200MA"] = df["Close"].rolling(window=200).mean()
         df["30MA"] = df["Close"].rolling(window=30).mean()
         df["60MA"] = df["Close"].rolling(window=60).mean()
-        plot_df = df.tail(120).copy()
+        df["87MA"] = df["Close"].rolling(window=87).mean()
+        df["284MA"] = df["Close"].rolling(window=284).mean()
+        
+        plot_df = df.tail(150).copy() 
         plot_df["DateStr"] = plot_df.index.strftime("%Y-%m-%d")
 
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=plot_df["DateStr"], y=plot_df["Close"], mode="lines", name="收盤價", line=dict(color="#00CC96", width=2.5)))
-        fig.add_trace(go.Scatter(x=plot_df["DateStr"], y=plot_df["30MA"], mode="lines", name="30MA(月線)", line=dict(color="#AB63FA", width=1, dash="dot")))
-        fig.add_trace(go.Scatter(x=plot_df["DateStr"], y=plot_df["60MA"], mode="lines", name="60MA(季線)", line=dict(color="#19D3F3", width=1, dash="dot")))
-        fig.add_trace(go.Scatter(x=plot_df["DateStr"], y=plot_df["200MA"], mode="lines", name="200MA(生命線)", line=dict(color="#FFA15A", width=3)))
+        
+        if "87MA" in strategy_mode:
+            fig.add_trace(go.Scatter(x=plot_df["DateStr"], y=plot_df["87MA"], mode="lines", name="87MA (中期)", line=dict(color="#FF1493", width=2)))
+            fig.add_trace(go.Scatter(x=plot_df["DateStr"], y=plot_df["284MA"], mode="lines", name="284MA (長線)", line=dict(color="#000000", width=3)))
+        else:
+            fig.add_trace(go.Scatter(x=plot_df["DateStr"], y=plot_df["30MA"], mode="lines", name="30MA(月線)", line=dict(color="#AB63FA", width=1, dash="dot")))
+            fig.add_trace(go.Scatter(x=plot_df["DateStr"], y=plot_df["60MA"], mode="lines", name="60MA(季線)", line=dict(color="#19D3F3", width=1, dash="dot")))
+            fig.add_trace(go.Scatter(x=plot_df["DateStr"], y=plot_df["200MA"], mode="lines", name="200MA(生命線)", line=dict(color="#FFA15A", width=3)))
 
-        # Logic 2.0: No markers
         fig.update_layout(
             title=f"📊 {name} ({ticker}) 股價 vs 均線排列",
             yaxis_title="價格", height=500, hovermode="x unified",
@@ -672,7 +717,6 @@ with st.sidebar:
             st.success(f"⚡ 已快速載入上次資料 ({st.session_state['last_update']})")
         except Exception as e: st.error(f"讀取快取失敗: {e}")
 
-    # System: Connection Test
     if st.button("🩺 測試連線 (Check IP)"):
         ok, msg = test_connection()
         if ok: st.success(msg)
@@ -686,9 +730,8 @@ with st.sidebar:
             with placeholder_emoji:
                 st.markdown("""<div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">🎁💰✨</div>
                     <style>@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }</style>
-                    <div style="text-align: center;">連線下載中 (Batch=100)...</div>""", unsafe_allow_html=True)
+                    <div style="text-align: center;">連線下載中 (Batch=50)...</div>""", unsafe_allow_html=True)
             
-            # System: Debug Log
             debug_container = st.expander("🕵️ 下載詳細日誌 (Debug Log)", expanded=True)
             
             status_text = st.empty()
@@ -709,7 +752,7 @@ with st.sidebar:
     if st.session_state["last_update"]: st.caption(f"最後更新：{st.session_state['last_update']}")
     st.divider()
     with st.expander("🔐 管理員後台"):
-        admin_pwd = st.text_input("請輸入管理密碼", type="password")
+        admin_pwd = st.text_input("請輸入管理密碼", type="password", key="admin_pwd_input")
         if admin_pwd == "admin1133":
             if os.path.exists(LOG_FILE):
                 st.markdown("### 🚦 流量統計")
@@ -725,7 +768,14 @@ with st.sidebar:
     bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 5.0, 2.5, step=0.1)
     min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
     st.subheader("策略選擇")
-    strategy_mode = st.radio("選擇篩選策略：", ("🛡️ 生命線保衛戰 (反彈/支撐)", "🔥 起死回生 (Da來守住)", "🐎 多頭馬車發動 (多頭排列)", "🏹 蓄勢待發 (KD+紅吞)", "⚡ 光神腳 (紅吞+左腳KD<80)"))
+    strategy_mode = st.radio("選擇篩選策略：", (
+        "🛡️ 生命線保衛戰 (反彈/支撐)", 
+        "🔥 起死回生 (Da來守住)", 
+        "🐎 多頭馬車發動 (多頭排列)", 
+        "🏹 蓄勢待發 (KD+紅吞)", 
+        "⚡ 光神腳 (紅吞+左腳KD<80)",
+        "📈 87MA 金叉 284MA (5日內波段多頭)" 
+    ))
     st.caption("細部條件：")
     filter_trend_up = False
     filter_trend_down = False
@@ -748,6 +798,8 @@ with st.sidebar:
         st.info("條件：K<20後金叉，金叉後3日內發動(K>=20, 紅吞黑)。")
     elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)":
         st.info("條件：左腳(K<20)；頸線(波段高點) K<80；紅吞黑發動。")
+    elif strategy_mode == "📈 87MA 金叉 284MA (5日內波段多頭)":
+        st.info("條件：87 日均線由下往上穿越 284 日長線，且發生在近 5 個交易日內，長線走多確認。")
 
     st.divider()
     st.caption("⚠️ 回測將使用上方「最低成交量」過濾。")
@@ -759,27 +811,39 @@ with st.sidebar:
         use_royal_param = (strategy_mode == "🐎 多頭馬車發動 (多頭排列)")
         use_legkick_param = (strategy_mode == "🏹 蓄勢待發 (KD+紅吞)")
         use_w_bottom_param = (strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)")
+        use_ma87_284_param = (strategy_mode == "📈 87MA 金叉 284MA (5日內波段多頭)")
 
         bt_df = run_strategy_backtest(
             stock_dict, bt_progress, mode=strategy_mode,
             use_trend_up=filter_trend_up, use_treasure=use_treasure_param,
             use_vol=filter_vol_double, use_royal=use_royal_param,
             use_leg_kick=use_legkick_param, use_w_bottom=use_w_bottom_param,
+            use_ma87_284=use_ma87_284_param, 
             min_vol_threshold=min_vol_input,
         )
         st.session_state["backtest_result"] = bt_df
         bt_progress.empty()
         st.success("回測完成！")
 
+    # 🔥 開發日誌上鎖
     with st.expander("📅 系統開發日誌"):
-        st.write(f"**🕒 重啟時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-        st.markdown("---")
-        st.markdown("""
-            ### Ver 2.0 (Original Logic + Stable System)
-            * **邏輯**：還原 Ver 2.0 基礎邏輯。
-            * **系統**：使用 Ver 2.1a 的連線引擎 (Threads=False) 防止當機。
-            * **速度**：Batch size 加大至 100，縮短休息時間以提速。
-            """)
+        log_pwd = st.text_input("請輸入密碼以查看日誌", type="password", key="dev_log_pwd")
+        if log_pwd == "1103":
+            st.write(f"**🕒 系統時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            st.markdown("---")
+            st.markdown("""
+                ### Ver 2.2a
+                * **介面優化**：標題極簡化，隱藏過多技術說明。
+                * **日誌上鎖**：系統開發日誌加入密碼保護機制，維護介面清爽。
+                * **新增策略**：87MA 金叉 284MA (近 5 日有效)，自動畫出專屬長週期均線圖。
+                * **資料擴展**：下載範圍調整至 2 年，以滿足 284MA 之計算門檻。
+                ### Ver 2.1b & 2.1a & 2.0
+                * **系統修復**：移除自訂 Session，強制單執行緒下載，解決 YF 連線崩潰問題。
+                * **效能優化**：Batch size 調整為 50，加入自動垃圾回收 (gc.collect)。
+                * **策略還原**：光神腳保留頸線波段高點、嚴格 K<80 濾網、嚴格紅吞黑發動。
+                """)
+        elif log_pwd != "":
+            st.error("密碼錯誤")
 
 # 主畫面 - 日常篩選
 if st.session_state["master_df"] is not None:
@@ -798,6 +862,8 @@ if st.session_state["master_df"] is not None:
         df = df[df["蓄勢待發"] == True] if "蓄勢待發" in df.columns else df.iloc[0:0]
     elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)":
         df = df[df["光神腳"] == True] if "光神腳" in df.columns else df.iloc[0:0]
+    elif strategy_mode == "📈 87MA 金叉 284MA (5日內波段多頭)":
+        df = df[df["長線多頭"] == True] if "長線多頭" in df.columns else df.iloc[0:0]
     else:
         df = df[df["abs_bias"] <= bias_threshold]
         if filter_trend_up: df = df[df["生命線趨勢"].str.contains("向上")]
@@ -819,10 +885,12 @@ if st.session_state["master_df"] is not None:
         fixed_display_cols = ["代號", "名稱", "產業", "收盤價", "生命線", "乖離率(%)", "位置", "KD值", "成交量(張)"]
         if strategy_mode == "🐎 多頭馬車發動 (多頭排列)":
             fixed_display_cols = ["代號", "名稱", "產業", "收盤價", "MA30", "MA60", "生命線", "KD值", "成交量(張)"]
+        elif "87MA" in strategy_mode:
+            fixed_display_cols = ["代號", "名稱", "產業", "收盤價", "金叉日期", "乖離率(%)", "位置", "成交量(張)"]
 
         for col in fixed_display_cols:
             if col not in df.columns:
-                if col in ['名稱', '產業', '位置', 'KD值']: df[col] = "-"
+                if col in ['名稱', '產業', '位置', 'KD值', '金叉日期']: df[col] = "-"
                 else: df[col] = 0
 
         df = df.sort_values(by="成交量", ascending=False)
@@ -833,15 +901,17 @@ if st.session_state["master_df"] is not None:
         with tab1:
             def highlight_row(row):
                 return ["background-color: #e6fffa; color: black"] * len(row) if row["收盤價"] > row["生命線"] else ["background-color: #fff0f0; color: black"] * len(row)
-            st.dataframe(final_df_to_show.style.apply(highlight_row, axis=1), use_container_width=True, hide_index=True)
+            try:
+                st.dataframe(final_df_to_show.style.apply(highlight_row, axis=1), use_container_width=True, hide_index=True)
+            except:
+                st.dataframe(final_df_to_show, use_container_width=True, hide_index=True)
 
         with tab2:
             st.markdown("### 🔍 個股趨勢圖")
             selected_stock_label = st.selectbox("請選擇一檔股票：", df["選股標籤"].tolist())
             selected_row = df[df["選股標籤"] == selected_stock_label].iloc[0]
             
-            # Logic 2.0: No Markers
-            plot_stock_chart(selected_row["完整代號"], selected_row["名稱"])
+            plot_stock_chart(selected_row["完整代號"], selected_row["名稱"], strategy_mode)
 
             # ✅ 在詳細頁揭露隱藏資訊
             if strategy_mode == "🏹 蓄勢待發 (KD+紅吞)":
@@ -861,6 +931,11 @@ if st.session_state["master_df"] is not None:
                 w_peak = selected_row.get("中高日期", "-")
                 with w_col1: st.info(f"🦶 左腳落底\n\n**{w_left}**")
                 with w_col2: st.warning(f"⛰️ 頸線高點\n\n**{w_peak}**")
+            
+            elif "87MA" in strategy_mode:
+                st.markdown("---")
+                cross_date = selected_row.get("金叉日期", "-")
+                st.success(f"🔥 長線多頭確認！\n\n**87MA 突破 284MA 金叉日：{cross_date}**")
 
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 下載最新股價」** 按鈕開始挖寶！")
