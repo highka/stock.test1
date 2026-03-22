@@ -116,15 +116,15 @@ def calculate_kd_series(df, n=9):
     d_series = pd.Series(d_list, index=df.index)
     return k_series, d_series
 
-# --- 新增：87MA 金叉 284MA 偵測 (5日內) ---
+# --- 新增：87MA 金叉 284MA 偵測 (10日內) ---
 def detect_ma87_284_cross(ma87_series, ma284_series, current_idx):
     """
-    偵測 87MA 是否在近 5 個交易日內由下往上穿越 284MA
+    偵測 87MA 是否在近 10 個交易日內由下往上穿越 284MA
     """
     if current_idx < 284:
         return False, 0
         
-    for offset in range(5):
+    for offset in range(10):
         check_idx = current_idx - offset
         prev_idx = check_idx - 1
         
@@ -774,7 +774,7 @@ with st.sidebar:
         "🐎 多頭馬車發動 (多頭排列)", 
         "🏹 蓄勢待發 (KD+紅吞)", 
         "⚡ 光神腳 (紅吞+左腳KD<80)",
-        "📈 87MA 金叉 284MA (5日內波段多頭)" 
+        "📈 87MA 金叉 284MA (10日內波段多頭)" 
     ))
     st.caption("細部條件：")
     filter_trend_up = False
@@ -798,8 +798,8 @@ with st.sidebar:
         st.info("條件：K<20後金叉，金叉後3日內發動(K>=20, 紅吞黑)。")
     elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)":
         st.info("條件：左腳(K<20)；頸線(波段高點) K<80；紅吞黑發動。")
-    elif strategy_mode == "📈 87MA 金叉 284MA (5日內波段多頭)":
-        st.info("條件：87 日均線由下往上穿越 284 日長線，且發生在近 5 個交易日內，長線走多確認。")
+    elif strategy_mode == "📈 87MA 金叉 284MA (10日內波段多頭)":
+        st.info("條件：87 日均線由下往上穿越 284 日長線，且發生在近 10 個交易日內，長線走多確認。")
 
     st.divider()
     st.caption("⚠️ 回測將使用上方「最低成交量」過濾。")
@@ -811,7 +811,7 @@ with st.sidebar:
         use_royal_param = (strategy_mode == "🐎 多頭馬車發動 (多頭排列)")
         use_legkick_param = (strategy_mode == "🏹 蓄勢待發 (KD+紅吞)")
         use_w_bottom_param = (strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)")
-        use_ma87_284_param = (strategy_mode == "📈 87MA 金叉 284MA (5日內波段多頭)")
+        use_ma87_284_param = (strategy_mode == "📈 87MA 金叉 284MA (10日內波段多頭)")
 
         bt_df = run_strategy_backtest(
             stock_dict, bt_progress, mode=strategy_mode,
