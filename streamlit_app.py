@@ -12,7 +12,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 2.2b"
+VER = "ver 2.2c (穩定連線版)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -116,7 +116,6 @@ def calculate_kd_series(df, n=9):
     d_series = pd.Series(d_list, index=df.index)
     return k_series, d_series
 
-# --- 新增：87MA 金叉 284MA 偵測 (10日內) ---
 def detect_ma87_284_cross(ma87_series, ma284_series, current_idx):
     """
     偵測 87MA 是否在近 10 個交易日內由下往上穿越 284MA
@@ -237,7 +236,8 @@ def run_strategy_backtest(
 ):
     results = []
     all_tickers = list(stock_dict.keys())
-    BATCH_SIZE = 50
+    # 🛡️ 防封鎖修改：調降 Batch Size
+    BATCH_SIZE = 40
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     OBSERVE_DAYS = 30 
 
@@ -245,7 +245,12 @@ def run_strategy_backtest(
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
             data = yf.download(batch, period="3y", interval="1d", progress=False, auto_adjust=False, threads=False)
-            if data.empty: continue
+            # 🛡️ 防封鎖修改：遇到阻擋時給予較長冷卻時間重試
+            if data.empty: 
+                time.sleep(8)
+                data = yf.download(batch, period="3y", interval="1d", progress=False, auto_adjust=False, threads=False)
+                if data.empty: continue
+                
             try:
                 df_o, df_c = data["Open"], data["Close"]
                 df_v, df_l, df_h = data["Volume"], data["Low"], data["High"]
@@ -470,7 +475,8 @@ def run_strategy_backtest(
         except: pass
         progress = (i + 1) / total_batches
         progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
-        time.sleep(0.2)
+        # 🛡️ 防封鎖修改：隨機休息 0.8 ~ 1.5 秒
+        time.sleep(random.uniform(0.8, 1.5))
         gc.collect() 
     return pd.DataFrame(results)
 
@@ -480,7 +486,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
         return pd.DataFrame()
         
     all_tickers = list(stock_dict.keys())
-    BATCH_SIZE = 50 
+    # 🛡️ 防封鎖修改：調降 Batch Size
+    BATCH_SIZE = 40 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
     
@@ -497,7 +504,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
             msg = f"Batch {i+1}: 嘗試下載 {len(batch)} 檔"
             if data.empty:
                 msg += " ❌ (Empty Response)"
-                time.sleep(3) 
+                # 🛡️ 防封鎖修改：拉長重試前冷卻時間至 8 秒
+                time.sleep(8) 
                 data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
                 if data.empty:
                     msg += " -> 重試失敗"
@@ -646,7 +654,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
             
         current_progress = (i + 1) / total_batches
         progress_bar.progress(current_progress, text=f"系統正在努力挖掘寶藏中...({int(current_progress*100)}%)")
-        time.sleep(0.2)
+        # 🛡️ 防封鎖修改：隨機休息 0.8 ~ 1.5 秒
+        time.sleep(random.uniform(0.8, 1.5))
         gc.collect() 
     return pd.DataFrame(raw_data_list)
 
@@ -672,7 +681,6 @@ def plot_stock_chart(ticker, name, strategy_mode=""):
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=plot_df["DateStr"], y=plot_df["Close"], mode="lines", name="收盤價", line=dict(color="#00CC96", width=2.5)))
         
-        # --- 繪圖區也同步改為對應「黃金長期勝率滿分」 ---
         if strategy_mode == "🎯 黃金長期勝率滿分":
             fig.add_trace(go.Scatter(x=plot_df["DateStr"], y=plot_df["87MA"], mode="lines", name="87MA (中期)", line=dict(color="#FF1493", width=2)))
             fig.add_trace(go.Scatter(x=plot_df["DateStr"], y=plot_df["284MA"], mode="lines", name="284MA (長線)", line=dict(color="#000000", width=3)))
@@ -731,7 +739,7 @@ with st.sidebar:
             with placeholder_emoji:
                 st.markdown("""<div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">🎁💰✨</div>
                     <style>@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }</style>
-                    <div style="text-align: center;">連線下載中 (Batch=50)...</div>""", unsafe_allow_html=True)
+                    <div style="text-align: center;">連線下載中 (Batch=40)...</div>""", unsafe_allow_html=True)
             
             debug_container = st.expander("🕵️ 下載詳細日誌 (Debug Log)", expanded=True)
             
@@ -770,7 +778,6 @@ with st.sidebar:
     min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
     st.subheader("策略選擇")
     
-    # --- 修改點：策略名稱全部統一為「🎯 黃金長期勝率滿分」 ---
     strategy_mode = st.radio("選擇篩選策略：", (
         "🛡️ 生命線保衛戰 (反彈/支撐)", 
         "🔥 起死回生 (Da來守住)", 
@@ -779,6 +786,7 @@ with st.sidebar:
         "⚡ 光神腳 (紅吞+左腳KD<80)",
         "🎯 黃金長期勝率滿分"  
     ))
+    
     st.caption("細部條件：")
     filter_trend_up = False
     filter_trend_down = False
@@ -814,8 +822,6 @@ with st.sidebar:
         use_royal_param = (strategy_mode == "🐎 多頭馬車發動 (多頭排列)")
         use_legkick_param = (strategy_mode == "🏹 蓄勢待發 (KD+紅吞)")
         use_w_bottom_param = (strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)")
-        
-        # --- 策略對應變數 ---
         use_ma87_284_param = (strategy_mode == "🎯 黃金長期勝率滿分")
 
         bt_df = run_strategy_backtest(
@@ -837,10 +843,10 @@ with st.sidebar:
             st.write(f"**🕒 系統時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
             st.markdown("---")
             st.markdown("""
-                ### Ver 2.2b
-                * **修復Bug**：解決「長線多頭」策略名稱在判斷式與UI介面不一致，導致篩選為空的嚴重問題。
-                * **名稱修改**：正式更名為「🎯 黃金長期勝率滿分」。
-                * **資料擴展**：下載範圍調整至 2 年，以滿足 284MA 之計算門檻。
+                ### Ver 2.2c (穩定連線版)
+                * **防禦升級**：針對 Yahoo Finance 阻擋機制，調降批次處理量至 40，並加入動態隨機休息 (0.8 ~ 1.5秒)，大幅提高全市場下載穩定度。
+                * **重大修復**：解決策略名稱字串不一致導致的篩選器失效問題。
+                * **新策略名稱**：修改為「黃金長期勝率滿分」。
                 """)
         elif log_pwd != "":
             st.error("密碼錯誤")
@@ -862,8 +868,6 @@ if st.session_state["master_df"] is not None:
         df = df[df["蓄勢待發"] == True] if "蓄勢待發" in df.columns else df.iloc[0:0]
     elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)":
         df = df[df["光神腳"] == True] if "光神腳" in df.columns else df.iloc[0:0]
-        
-    # --- 這裡就是原本的大蟲！之前寫「5日內」，導致和上面的名稱對不起來 ---
     elif strategy_mode == "🎯 黃金長期勝率滿分":
         df = df[df["長線多頭"] == True] if "長線多頭" in df.columns else df.iloc[0:0]
     else:
