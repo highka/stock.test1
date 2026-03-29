@@ -12,7 +12,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 2.4 (固若金湯版)"
+VER = "ver 2.6 (固若金湯-抗洗盤終極版)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -119,85 +119,94 @@ def calculate_kd_series(df, n=9):
 def _is_red_engulf_black(prev_open, prev_close, curr_open, curr_close):
     prev_is_black = prev_close < prev_open
     curr_is_red = curr_close > curr_open
-    engulf = (curr_open <= prev_close) and (curr_close > prev_open)
+    # 嚴格紅吞黑：開盤必須低於等於昨日收盤，收盤必須高於昨日開盤
+    engulf = (curr_open <= prev_close) and (curr_close >= prev_open)
     return prev_is_black and curr_is_red and engulf
 
-# --- 新增策略：🛡️ 固若金湯 (破底翻突破) ---
+# --- 新增策略：🛡️ 固若金湯 (抗洗盤終極版) ---
 def detect_solid_defense_signal(stock_df, k_series, lookback=60):
-    if len(stock_df) < 15: # 至少需要一些天數來成型
+    if len(stock_df) < 20: 
         return False, {}
 
     recent_df = stock_df.tail(lookback).copy()
     idx_list = list(recent_df.index)
     today_idx = idx_list[-1]
-
-    # 1. 找最低點 (到昨天為止的最低點，因為今天要突破)
-    past_df = recent_df.iloc[:-1]
-    if past_df.empty: return False, {}
     
-    t_low = past_df['Low'].idxmin()
-    t_low_pos = idx_list.index(t_low)
+    today_o = float(recent_df.loc[today_idx, 'Open'])
+    today_c = float(recent_df.loc[today_idx, 'Close'])
+    
+    if today_c <= today_o: 
+        return False, {} # 發動點必須是實體紅K棒
 
-    if t_low_pos == len(idx_list) - 1: 
-        return False, {} # 最低點太近，沒有時間形成箱型和守住訊號
-
-    Daa = float(recent_df.loc[t_low, 'Low'])
-    Da = float(recent_df.loc[t_low, 'Close'])
-
-    # 2. 找箱頂 (最低點之後，到昨天為止的最高點)
-    box_period = recent_df.iloc[t_low_pos + 1 : -1]
-    if box_period.empty:
-        box_top = Da # 防呆
-    else:
-        box_top = float(box_period['High'].max())
-
-    # 3. 檢查是否有「守住」訊號
-    held_support = False
-    hold_date = None
-    hold_type = ""
-
-    for i in range(t_low_pos + 1, len(idx_list)):
-        curr_dt = idx_list[i]
-        prev_dt = idx_list[i - 1]
-
-        curr_o, curr_c = float(recent_df.loc[curr_dt, 'Open']), float(recent_df.loc[curr_dt, 'Close'])
-        prev_o, prev_c = float(recent_df.loc[prev_dt, 'Open']), float(recent_df.loc[prev_dt, 'Close'])
-
-        if curr_dt in k_series.index:
-            curr_k = float(k_series.loc[curr_dt])
-        else:
-            curr_k = 0.0
-
-        is_engulf = _is_red_engulf_black(prev_o, prev_c, curr_o, curr_c)
-
-        if is_engulf and curr_k > 20:
-            if curr_c > Da:
-                held_support = True
-                hold_date = curr_dt
-                hold_type = "守住Da"
-            elif curr_c > Daa:
-                held_support = True
-                hold_date = curr_dt
-                hold_type = "守住Daa"
-
-    if not held_support:
+    # 1. 尋找近期的箱型頂部 (Box Top)
+    # 我們抓取過去 20 個交易日內(不含今天)的最高點，當作今天即將突破的箱頂
+    search_period = recent_df.iloc[-21:-1]
+    if search_period.empty: return False, {}
+    
+    peak_idx = search_period['High'].idxmax()
+    box_top = float(recent_df.loc[peak_idx, 'High'])
+    
+    # 突破條件：今日收盤價必須大於箱頂
+    if today_c <= box_top: 
         return False, {}
-
-    # 4. 檢查今天是否為進場發動點 (拉出一根紅棒，且突破箱型頂部)
-    today_o, today_c = float(recent_df.loc[today_idx, 'Open']), float(recent_df.loc[today_idx, 'Close'])
-    is_red_today = today_c > today_o
-    is_breakout = today_c > box_top
-
-    if is_red_today and is_breakout:
+        
+    # 2. 錨定左腳 (基準 K 棒 Daa)
+    # 左腳必須在箱頂「之前」發生
+    peak_pos = idx_list.index(peak_idx)
+    left_window = recent_df.iloc[max(0, peak_pos-30) : peak_pos] 
+    if left_window.empty: return False, {}
+    
+    anchor_idx = left_window['Low'].idxmin() # 第一隻腳的絕對低點
+    anchor_pos = idx_list.index(anchor_idx)
+    
+    Daa = float(recent_df.loc[anchor_idx, 'Low'])
+    Da = float(recent_df.loc[anchor_idx, 'Close'])
+    
+    # 3. 檢查右腳 (測試期間) 是否成功抗洗盤
+    # 從箱頂之後，到昨天為止的期間
+    right_window = recent_df.iloc[peak_pos+1 : -1]
+    if right_window.empty: return False, {}
+    
+    defense_failed = False
+    for r_idx in right_window.index:
+        r_close = float(recent_df.loc[r_idx, 'Close'])
+        # 關鍵精髓：盤中低於 Daa 沒關係 (例如27.30 < 27.50)，只要「收盤價」死守在 Daa 之上即可！
+        if r_close < Daa:
+            defense_failed = True
+            break
+            
+    if defense_failed: return False, {}
+    
+    # 4. 確認紅吞黑發動訊號
+    # 在右腳測試期間(或今天)，是否出現過紅吞黑 + KD>20？
+    engulf_confirmed = False
+    confirm_date = None
+    
+    for check_i in range(peak_pos+1, len(idx_list)):
+        curr_dt = idx_list[check_i]
+        prev_dt = idx_list[check_i - 1]
+        
+        curr_o = float(recent_df.loc[curr_dt, 'Open'])
+        curr_c = float(recent_df.loc[curr_dt, 'Close'])
+        prev_o = float(recent_df.loc[prev_dt, 'Open'])
+        prev_c = float(recent_df.loc[prev_dt, 'Close'])
+        curr_k = float(k_series.loc[curr_dt])
+        
+        is_engulf = _is_red_engulf_black(prev_o, prev_c, curr_o, curr_c)
+        
+        if is_engulf and curr_k > 20:
+            engulf_confirmed = True
+            confirm_date = curr_dt
+            break
+            
+    if engulf_confirmed:
         return True, {
-            "最低點日期": t_low,
-            "Da": Da,
+            "基準日期": anchor_idx,
             "Daa": Daa,
             "箱頂": box_top,
-            "守住日期": hold_date,
-            "守住類型": hold_type
+            "守住日期": confirm_date
         }
-
+        
     return False, {}
 
 def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=20):
@@ -361,10 +370,9 @@ def run_strategy_backtest(
                             sd_ok, sd_det = detect_solid_defense_signal(sub_df, k_full, lookback=60)
                             if sd_ok:
                                 is_match = True
-                                detail_info["最低點日期"] = sd_det["最低點日期"].strftime("%m-%d")
-                                detail_info["守住日期"] = sd_det["守住日期"].strftime("%m-%d")
-                                detail_info["守住類型"] = sd_det["守住類型"]
+                                detail_info["基準日期"] = sd_det["基準日期"].strftime("%m-%d")
                                 detail_info["箱頂"] = round(sd_det["箱頂"], 2)
+                                detail_info["守住日期"] = sd_det["守住日期"].strftime("%m-%d")
                                 stop_loss_price = sd_det["Daa"]
                                 target_price = close_p + (close_p - stop_loss_price) * 1.5
 
@@ -478,9 +486,8 @@ def run_strategy_backtest(
                             "結果": "觀察中" if is_watching else result_status,
                         }
                         if use_solid_defense:
-                            record["最低點"] = detail_info.get("最低點日期", "")
+                            record["基準日期"] = detail_info.get("基準日期", "")
                             record["守住日期"] = detail_info.get("守住日期", "")
-                            record["守住類型"] = detail_info.get("守住類型", "")
                             record["箱頂"] = detail_info.get("箱頂", "")
                         if use_leg_kick:
                             record["KD低點"] = detail_info.get("KD低點", "")
@@ -647,9 +654,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
                             "位置": "🟢生命線上" if price >= ma200 else "🔴生命線下",
                             "浴火重生": is_treasure,
                             "固若金湯": is_solid_defense,
-                            "最低點日期": sd_details.get("最低點日期", "").strftime("%Y-%m-%d") if sd_details else "",
+                            "基準日期": sd_details.get("基準日期", "").strftime("%Y-%m-%d") if sd_details else "",
                             "守住日期": sd_details.get("守住日期", "").strftime("%Y-%m-%d") if sd_details else "",
-                            "守住類型": sd_details.get("守住類型", ""),
                             "箱頂": round(sd_details.get("箱頂", 0.0), 2) if sd_details else 0.0,
                             "蓄勢待發": is_leg_kick,
                             "蓄勢日期": leg_kick_date.strftime("%Y-%m-%d") if leg_kick_date else "",
@@ -783,7 +789,6 @@ with st.sidebar:
     min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
     st.subheader("策略選擇")
     
-    # 變更策略名稱
     strategy_mode = st.radio("選擇篩選策略：", (
         "🛡️ 生命線保衛戰 (反彈/支撐)", 
         "🔥 起死回生 (Da來守住)", 
@@ -808,7 +813,7 @@ with st.sidebar:
         st.info("ℹ️ 過去7日跌破，今日站回生命線。")
         filter_vol_double = st.checkbox("出量確認", value=False)
     elif strategy_mode == "🛡️ 固若金湯 (破底翻突破)":
-        st.info("條件：尋找波段底部 Da(收盤價)/Daa(最低價)。出現紅吞且 KD>20 確認守住底部後，今日以紅 K 強勢突破反彈高點（箱頂）。")
+        st.info("條件：定義近期高點為箱頂，並往前找出最低 Daa 基準。回測期間無懼下影線假跌破，只要收盤價守住 Daa，且出現「紅吞黑+KD>20」，今日以實體紅K強勢突破箱頂即為買點。")
     elif strategy_mode == "🏹 蓄勢待發 (KD+紅吞)":
         st.info("條件：K<20後金叉，金叉後3日內發動(K>=20, 紅吞黑)。")
     elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)":
@@ -843,10 +848,9 @@ with st.sidebar:
             st.write(f"**🕒 系統時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
             st.markdown("---")
             st.markdown("""
-                ### Ver 2.4 (固若金湯版)
-                * **新策略上線**：移除舊有多頭馬車，替換為全新的「固若金湯 (破底翻突破)」策略。
-                * **嚴謹底部邏輯**：智能找尋區間底部 (Da/Daa)，確認「守住訊號(紅吞+KD>20)」後，精準抓取帶量紅K突破箱型頂部的進場起漲點。
-                * **資訊面板擴充**：策略資訊列詳細揭露「落底時間」、「箱型頂部價格」、「守住類型 (Da/Daa)」。
+                ### Ver 2.6 (固若金湯-抗洗盤終極版)
+                * **假跌破免疫**：重構抓底邏輯，先定位近期箱頂，再往前錨定最深低點 (Daa)。完美免疫右腳跌破 Daa 但收盤拉回的「假跌破洗盤」手法。
+                * **嚴苛發動條件**：要求在右腳測試期間必須出現防守訊號 (紅吞+KD>20)，且發動當日必須是實體紅K棒並一舉突破箱頂，大幅過濾無效訊號。
                 """)
         elif log_pwd != "":
             st.error("密碼錯誤")
@@ -888,11 +892,11 @@ if st.session_state["master_df"] is not None:
         # 固定版面顯示欄位
         fixed_display_cols = ["代號", "名稱", "產業", "收盤價", "生命線", "乖離率(%)", "位置", "KD值", "成交量(張)"]
         if strategy_mode == "🛡️ 固若金湯 (破底翻突破)":
-            fixed_display_cols = ["代號", "名稱", "產業", "收盤價", "箱頂", "守住類型", "生命線", "KD值", "成交量(張)"]
+            fixed_display_cols = ["代號", "名稱", "產業", "收盤價", "箱頂", "守住日期", "生命線", "KD值", "成交量(張)"]
 
         for col in fixed_display_cols:
             if col not in df.columns:
-                if col in ['名稱', '產業', '位置', 'KD值', '守住類型']: df[col] = "-"
+                if col in ['名稱', '產業', '位置', 'KD值', '守住日期']: df[col] = "-"
                 else: df[col] = 0
 
         df = df.sort_values(by="成交量", ascending=False)
@@ -920,8 +924,8 @@ if st.session_state["master_df"] is not None:
                 st.markdown("---")
                 st.caption("🛡️ 固若金湯策略詳細數據:")
                 c1, c2, c3 = st.columns(3)
-                with c1: st.info(f"📉 落底點 (Da/Daa)\n\n**{selected_row.get('最低點日期', '-')}**")
-                with c2: st.warning(f"🛡️ 守住確認日\n\n**{selected_row.get('守住日期', '-')} ({selected_row.get('守住類型', '-')})**")
+                with c1: st.info(f"📉 左腳基準日 (Daa)\n\n**{selected_row.get('基準日期', '-')}**")
+                with c2: st.warning(f"🛡️ 右腳守住確認日\n\n**{selected_row.get('守住日期', '-')}**")
                 with c3: st.success(f"🚀 突破箱頂價位\n\n**{selected_row.get('箱頂', '-')}**")
 
             elif strategy_mode == "🏹 蓄勢待發 (KD+紅吞)":
