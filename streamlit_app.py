@@ -12,7 +12,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 2.6 (固若金湯-抗洗盤終極版)"
+VER = "ver 2.6a (回測報告修復版)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -713,6 +713,34 @@ def plot_stock_chart(ticker, name, strategy_mode=""):
 st.title(f"✨ {VER} 黑嚕嚕-旗鼓相當")
 st.markdown("---")
 
+# 🚨 新增：回測結果顯示戰情面板 🚨
+if st.session_state.get("backtest_result") is not None:
+    bt_df = st.session_state["backtest_result"]
+    st.subheader("🧪 策略歷史回測報告")
+    
+    if not bt_df.empty:
+        # 計算勝率
+        win_count = len(bt_df[bt_df["結果"].str.contains("Win", na=False)])
+        loss_count = len(bt_df[bt_df["結果"].str.contains("Loss", na=False)])
+        total_closed = win_count + loss_count
+        win_rate = (win_count / total_closed * 100) if total_closed > 0 else 0
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("回測總訊號數", f"{len(bt_df)} 筆")
+        c2.metric("已完成交易(平倉)", f"{total_closed} 筆")
+        c3.metric("歷史勝率", f"{win_rate:.1f} %", f"勝:{win_count} / 敗:{loss_count}")
+        
+        st.dataframe(bt_df, use_container_width=True)
+        
+        # 下載完整 CSV 按鈕
+        csv_data = bt_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button("📥 下載完整回測報告 (CSV)", csv_data, "backtest_report.csv", "text/csv")
+    else:
+        st.info("📉 這次回測沒有找到任何符合發動條件的歷史紀錄喔！")
+    
+    st.markdown("---")
+# ----------------------------------
+
 if "master_df" not in st.session_state: st.session_state["master_df"] = None
 if "last_update" not in st.session_state: st.session_state["last_update"] = None
 if "backtest_result" not in st.session_state: st.session_state["backtest_result"] = None
@@ -840,6 +868,7 @@ with st.sidebar:
         st.session_state["backtest_result"] = bt_df
         bt_progress.empty()
         st.success("回測完成！")
+        st.rerun() # 🚀 自動重整畫面顯示報告 🚀
 
     # 🔥 開發日誌上鎖
     with st.expander("📅 系統開發日誌"):
@@ -848,9 +877,9 @@ with st.sidebar:
             st.write(f"**🕒 系統時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
             st.markdown("---")
             st.markdown("""
-                ### Ver 2.6 (固若金湯-抗洗盤終極版)
-                * **假跌破免疫**：重構抓底邏輯，先定位近期箱頂，再往前錨定最深低點 (Daa)。完美免疫右腳跌破 Daa 但收盤拉回的「假跌破洗盤」手法。
-                * **嚴苛發動條件**：要求在右腳測試期間必須出現防守訊號 (紅吞+KD>20)，且發動當日必須是實體紅K棒並一舉突破箱頂，大幅過濾無效訊號。
+                ### Ver 2.6a (回測報告修復版)
+                * **重大修復**：修正了「策略回測」功能無法將結果輸出至 UI 的嚴重錯誤。現在回測完成後，將在主畫面頂部即時顯示戰情儀表板。
+                * **新增功能**：加入歷史勝率自動運算邏輯，並提供完整回測報告的 CSV 下載按鈕。
                 """)
         elif log_pwd != "":
             st.error("密碼錯誤")
@@ -880,7 +909,7 @@ if st.session_state["master_df"] is not None:
 
     if filter_vol_double: df = df[df["成交量"] > (df["昨日成交量"] * 1.5)]
 
-    if len(df) == 0: st.warning("⚠️ 找不到符合條件的股票！")
+    if len(df) == 0: st.warning("⚠️ 日常篩選：目前找不到符合條件的股票！")
     else:
         st.markdown(f"""<div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #ff4b4b;">
                 <h2 style="color: #333; margin:0;">🔍 根據共篩選出 <span style="color: #ff4b4b; font-size: 1.5em;">{len(df)}</span> 檔股票</h2></div><br>""", unsafe_allow_html=True)
