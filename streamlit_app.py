@@ -12,7 +12,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 2.7 (自訂停利回測版)"
+VER = "ver 2.7a (移動停利進化版)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -122,11 +122,10 @@ def _is_red_engulf_black(prev_open, prev_close, curr_open, curr_close):
     engulf = (curr_open <= prev_close) and (curr_close >= prev_open)
     return prev_is_black and curr_is_red and engulf
 
-# 新增：判斷是否為「黑吞紅 (空頭吞噬)」
 def _is_black_engulf_red(prev_open, prev_close, curr_open, curr_close):
     prev_is_red = prev_close > prev_open
     curr_is_black = curr_close < curr_open
-    # 黑吞紅：今日開盤 >= 昨日收盤，且今日收盤 <= 昨日開盤
+    # 黑吞紅：今日開高走低，收盤跌破昨日開盤
     engulf = (curr_open >= prev_close) and (curr_close <= prev_open)
     return prev_is_red and curr_is_black and engulf
 
@@ -295,7 +294,6 @@ def run_strategy_backtest(
     all_tickers = list(stock_dict.keys())
     BATCH_SIZE = 40
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
-    OBSERVE_DAYS = 30 
 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
@@ -372,7 +370,6 @@ def run_strategy_backtest(
                                 detail_info["箱頂"] = round(sd_det["箱頂"], 2)
                                 detail_info["守住日期"] = sd_det["守住日期"].strftime("%m-%d")
                                 stop_loss_price = sd_det["Daa"]
-                                # 這裡套用使用者自訂的停利測幅倍數
                                 target_price = close_p + (close_p - stop_loss_price) * tp_multiplier
 
                         elif use_w_bottom:
@@ -428,12 +425,14 @@ def run_strategy_backtest(
                         days_after_signal = total_len - 1 - idx
                         final_profit_pct = 0.0
                         result_status = "觀察中"
+                        
+                        target_reached = False # 紀錄是否已經達標警戒線
                         is_watching = False
                         
                         if days_after_signal < 1: 
                             is_watching = True
                         else:
-                            MAX_HOLD_DAYS = 30
+                            MAX_HOLD_DAYS = 45 # 為了讓獲利奔跑，把上限拉寬到 45 天
                             check_days = min(days_after_signal, MAX_HOLD_DAYS)
                             is_watching = True
                             
@@ -452,28 +451,34 @@ def run_strategy_backtest(
                                 prev_k = float(k_full.iloc[curr_idx - 1])
                                 prev_d = float(d_full.iloc[curr_idx - 1])
                                 
-                                # 1. 停損判斷
+                                # 追蹤是否達標
+                                if target_price > 0 and curr_h >= target_price:
+                                    target_reached = True
+                                
+                                # 1. 絕對停損判斷 (最優先)
                                 if stop_loss_price > 0 and curr_c < stop_loss_price:
                                     final_profit_pct = (curr_c - close_p) / close_p * 100
                                     is_watching = False
                                     result_status = "Loss (破防守) 🛑"
                                     break
                                 
-                                # 2. 黑吞紅強制停利/平倉判斷 (若使用者有勾選)
-                                if tp_black_engulf and _is_black_engulf_red(prev_o, prev_c, curr_o, curr_c):
-                                    final_profit_pct = (curr_c - close_p) / close_p * 100
-                                    is_watching = False
-                                    result_status = "Win (黑吞紅出場) 🐻" if final_profit_pct > 0 else "Loss (黑吞紅出場) 🐻"
-                                    break
-
-                                # 3. 目標價測幅停利
-                                if target_price > 0 and curr_h >= target_price:
-                                    final_profit_pct = (target_price - close_p) / close_p * 100
-                                    is_watching = False
-                                    result_status = f"Win (達標 {tp_multiplier}x) 🎯"
-                                    break
+                                # 2. 移動停利：如果已經達標
+                                if target_reached:
+                                    if tp_black_engulf:
+                                        # 達標後不走，繼續等「黑吞紅」才走
+                                        if _is_black_engulf_red(prev_o, prev_c, curr_o, curr_c):
+                                            final_profit_pct = (curr_c - close_p) / close_p * 100
+                                            is_watching = False
+                                            result_status = f"Win (達標後黑吞紅) 🐻🎯"
+                                            break
+                                    else:
+                                        # 傳統模式：碰到目標價當天立刻平倉
+                                        final_profit_pct = (target_price - close_p) / close_p * 100
+                                        is_watching = False
+                                        result_status = f"Win (達標 {tp_multiplier}x) 🎯"
+                                        break
                                     
-                                # 4. KD 高檔死叉動態平倉
+                                # 3. 動態防護：KD 高檔死叉 (不管達不達標都適用)
                                 if (prev_k > 80) and (prev_k >= prev_d) and (curr_k < curr_d):
                                     final_profit_pct = (curr_c - close_p) / close_p * 100
                                     is_watching = False
@@ -868,7 +873,7 @@ with st.sidebar:
     st.subheader("⚙️ 回測出場條件設定")
     c1, c2 = st.columns(2)
     with c1:
-        tp_black_engulf = st.checkbox("🐻 遇到『黑吞紅』強制平倉", value=False, help="若股價出現高檔黑吞紅(開高走低吃掉昨日紅K)則立即出場")
+        tp_black_engulf = st.checkbox("🐻 達標後等待『黑吞紅』才停利", value=True, help="打勾：達到測幅目標後不馬上平倉，讓獲利奔跑，直到出現黑吞紅才獲利了結。未打勾：碰到目標價立刻平倉。")
     with c2:
         tp_multiplier = st.selectbox("🎯 達標測幅倍數", [1.5, 2.0, 3.0, 5.0], index=0, help="設定獲利目標為底部震幅(或承擔風險)的幾倍")
 
@@ -889,8 +894,8 @@ with st.sidebar:
             use_vol=filter_vol_double, use_solid_defense=use_solid_defense_param,
             use_leg_kick=use_legkick_param, use_w_bottom=use_w_bottom_param,
             min_vol_threshold=min_vol_input,
-            tp_multiplier=tp_multiplier,        # 傳入倍數
-            tp_black_engulf=tp_black_engulf     # 傳入黑吞紅選項
+            tp_multiplier=tp_multiplier,
+            tp_black_engulf=tp_black_engulf
         )
         st.session_state["backtest_result"] = bt_df
         bt_progress.empty()
@@ -904,9 +909,9 @@ with st.sidebar:
             st.write(f"**🕒 系統時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
             st.markdown("---")
             st.markdown("""
-                ### Ver 2.7 (自訂停利回測版)
-                * **靈活出場機制**：新增「回測出場條件設定」面板。使用者可自由勾選是否在遇到「黑吞紅 (空頭吞噬)」型態時強制結算平倉，以此迴避高檔反轉風險。
-                * **彈性測幅倍數**：目標價改為由選單決定(支援 1.5x / 2.0x / 3.0x / 5.0x 倍風險報酬或震幅)，不再寫死於程式內，讓不同風險偏好的投資人能自由測試績效。
+                ### Ver 2.7a (移動停利進化版)
+                * **移動停利追蹤**：將「達標測幅」從靜態平倉線升級為「動態啟動線」。股價達標後不會馬上賣出，而是緊盯「黑吞紅 (空頭吞噬)」訊號，實現「讓獲利奔跑」的右側交易精神。
+                * **更寬廣的波段空間**：為了配合移動停利的長波段特性，回測最高持倉天數由 30 天展延至 45 天。
                 """)
         elif log_pwd != "":
             st.error("密碼錯誤")
