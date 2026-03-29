@@ -12,7 +12,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 2.6a (回測報告修復版)"
+VER = "ver 2.7 (自訂停利回測版)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -119,11 +119,17 @@ def calculate_kd_series(df, n=9):
 def _is_red_engulf_black(prev_open, prev_close, curr_open, curr_close):
     prev_is_black = prev_close < prev_open
     curr_is_red = curr_close > curr_open
-    # 嚴格紅吞黑：開盤必須低於等於昨日收盤，收盤必須高於昨日開盤
     engulf = (curr_open <= prev_close) and (curr_close >= prev_open)
     return prev_is_black and curr_is_red and engulf
 
-# --- 新增策略：🛡️ 固若金湯 (抗洗盤終極版) ---
+# 新增：判斷是否為「黑吞紅 (空頭吞噬)」
+def _is_black_engulf_red(prev_open, prev_close, curr_open, curr_close):
+    prev_is_red = prev_close > prev_open
+    curr_is_black = curr_close < curr_open
+    # 黑吞紅：今日開盤 >= 昨日收盤，且今日收盤 <= 昨日開盤
+    engulf = (curr_open >= prev_close) and (curr_close <= prev_open)
+    return prev_is_red and curr_is_black and engulf
+
 def detect_solid_defense_signal(stock_df, k_series, lookback=60):
     if len(stock_df) < 20: 
         return False, {}
@@ -136,49 +142,39 @@ def detect_solid_defense_signal(stock_df, k_series, lookback=60):
     today_c = float(recent_df.loc[today_idx, 'Close'])
     
     if today_c <= today_o: 
-        return False, {} # 發動點必須是實體紅K棒
+        return False, {} 
 
-    # 1. 尋找近期的箱型頂部 (Box Top)
-    # 我們抓取過去 20 個交易日內(不含今天)的最高點，當作今天即將突破的箱頂
     search_period = recent_df.iloc[-21:-1]
     if search_period.empty: return False, {}
     
     peak_idx = search_period['High'].idxmax()
     box_top = float(recent_df.loc[peak_idx, 'High'])
     
-    # 突破條件：今日收盤價必須大於箱頂
     if today_c <= box_top: 
         return False, {}
         
-    # 2. 錨定左腳 (基準 K 棒 Daa)
-    # 左腳必須在箱頂「之前」發生
     peak_pos = idx_list.index(peak_idx)
     left_window = recent_df.iloc[max(0, peak_pos-30) : peak_pos] 
     if left_window.empty: return False, {}
     
-    anchor_idx = left_window['Low'].idxmin() # 第一隻腳的絕對低點
+    anchor_idx = left_window['Low'].idxmin() 
     anchor_pos = idx_list.index(anchor_idx)
     
     Daa = float(recent_df.loc[anchor_idx, 'Low'])
     Da = float(recent_df.loc[anchor_idx, 'Close'])
     
-    # 3. 檢查右腳 (測試期間) 是否成功抗洗盤
-    # 從箱頂之後，到昨天為止的期間
     right_window = recent_df.iloc[peak_pos+1 : -1]
     if right_window.empty: return False, {}
     
     defense_failed = False
     for r_idx in right_window.index:
         r_close = float(recent_df.loc[r_idx, 'Close'])
-        # 關鍵精髓：盤中低於 Daa 沒關係 (例如27.30 < 27.50)，只要「收盤價」死守在 Daa 之上即可！
         if r_close < Daa:
             defense_failed = True
             break
             
     if defense_failed: return False, {}
     
-    # 4. 確認紅吞黑發動訊號
-    # 在右腳測試期間(或今天)，是否出現過紅吞黑 + KD>20？
     engulf_confirmed = False
     confirm_date = None
     
@@ -292,6 +288,8 @@ def run_strategy_backtest(
     use_leg_kick,
     use_w_bottom,
     min_vol_threshold,
+    tp_multiplier,
+    tp_black_engulf
 ):
     results = []
     all_tickers = list(stock_dict.keys())
@@ -374,7 +372,8 @@ def run_strategy_backtest(
                                 detail_info["箱頂"] = round(sd_det["箱頂"], 2)
                                 detail_info["守住日期"] = sd_det["守住日期"].strftime("%m-%d")
                                 stop_loss_price = sd_det["Daa"]
-                                target_price = close_p + (close_p - stop_loss_price) * 1.5
+                                # 這裡套用使用者自訂的停利測幅倍數
+                                target_price = close_p + (close_p - stop_loss_price) * tp_multiplier
 
                         elif use_w_bottom:
                             sub_df = full_ohlc.loc[:date].copy()
@@ -386,7 +385,7 @@ def run_strategy_backtest(
                                 stop_loss_price = left_low_p
                                 neck_high_p = float(sub_df.loc[t_peak, "High"])
                                 amplitude = neck_high_p - left_low_p
-                                target_price = close_p + (2 * amplitude)
+                                target_price = close_p + (amplitude * tp_multiplier)
 
                         elif use_leg_kick:
                             sub_df = full_ohlc.loc[:date].copy()
@@ -401,7 +400,7 @@ def run_strategy_backtest(
                                     left_low_p = float(sub_df.loc[t_low, "Close"])
                                 stop_loss_price = left_low_p
                                 amplitude = close_p - left_low_p
-                                target_price = close_p + (2 * amplitude)
+                                target_price = close_p + (amplitude * tp_multiplier)
 
                         else:
                             low_p = float(l_series.iloc[idx])
@@ -430,7 +429,9 @@ def run_strategy_backtest(
                         final_profit_pct = 0.0
                         result_status = "觀察中"
                         is_watching = False
-                        if days_after_signal < 1: is_watching = True
+                        
+                        if days_after_signal < 1: 
+                            is_watching = True
                         else:
                             MAX_HOLD_DAYS = 30
                             check_days = min(days_after_signal, MAX_HOLD_DAYS)
@@ -439,29 +440,44 @@ def run_strategy_backtest(
                             for d in range(1, check_days + 1):
                                 curr_idx = idx + d
                                 if curr_idx >= len(c_series): break
+                                
+                                curr_o = float(o_series.iloc[curr_idx])
                                 curr_c = float(c_series.iloc[curr_idx])
                                 curr_h = float(h_series.iloc[curr_idx])
                                 curr_k = float(k_full.iloc[curr_idx])
                                 curr_d = float(d_full.iloc[curr_idx])
+                                
+                                prev_o = float(o_series.iloc[curr_idx - 1])
+                                prev_c = float(c_series.iloc[curr_idx - 1])
                                 prev_k = float(k_full.iloc[curr_idx - 1])
                                 prev_d = float(d_full.iloc[curr_idx - 1])
                                 
+                                # 1. 停損判斷
                                 if stop_loss_price > 0 and curr_c < stop_loss_price:
                                     final_profit_pct = (curr_c - close_p) / close_p * 100
                                     is_watching = False
                                     result_status = "Loss (破防守) 🛑"
                                     break
                                 
+                                # 2. 黑吞紅強制停利/平倉判斷 (若使用者有勾選)
+                                if tp_black_engulf and _is_black_engulf_red(prev_o, prev_c, curr_o, curr_c):
+                                    final_profit_pct = (curr_c - close_p) / close_p * 100
+                                    is_watching = False
+                                    result_status = "Win (黑吞紅出場) 🐻" if final_profit_pct > 0 else "Loss (黑吞紅出場) 🐻"
+                                    break
+
+                                # 3. 目標價測幅停利
                                 if target_price > 0 and curr_h >= target_price:
                                     final_profit_pct = (target_price - close_p) / close_p * 100
                                     is_watching = False
-                                    result_status = "Win (達標停利) 🎯"
+                                    result_status = f"Win (達標 {tp_multiplier}x) 🎯"
                                     break
                                     
+                                # 4. KD 高檔死叉動態平倉
                                 if (prev_k > 80) and (prev_k >= prev_d) and (curr_k < curr_d):
                                     final_profit_pct = (curr_c - close_p) / close_p * 100
                                     is_watching = False
-                                    result_status = "Win (KD>80死叉) 📉"
+                                    result_status = "Win (KD>80死叉) 📉" if final_profit_pct > 0 else "Loss (KD死叉) 📉"
                                     break
                             
                             if is_watching:
@@ -713,7 +729,11 @@ def plot_stock_chart(ticker, name, strategy_mode=""):
 st.title(f"✨ {VER} 黑嚕嚕-旗鼓相當")
 st.markdown("---")
 
-# 🚨 新增：回測結果顯示戰情面板 🚨
+if "master_df" not in st.session_state: st.session_state["master_df"] = None
+if "last_update" not in st.session_state: st.session_state["last_update"] = None
+if "backtest_result" not in st.session_state: st.session_state["backtest_result"] = None
+
+# 回測結果顯示戰情面板
 if st.session_state.get("backtest_result") is not None:
     bt_df = st.session_state["backtest_result"]
     st.subheader("🧪 策略歷史回測報告")
@@ -739,11 +759,6 @@ if st.session_state.get("backtest_result") is not None:
         st.info("📉 這次回測沒有找到任何符合發動條件的歷史紀錄喔！")
     
     st.markdown("---")
-# ----------------------------------
-
-if "master_df" not in st.session_state: st.session_state["master_df"] = None
-if "last_update" not in st.session_state: st.session_state["last_update"] = None
-if "backtest_result" not in st.session_state: st.session_state["backtest_result"] = None
 
 with st.sidebar:
     st.header("資料庫管理")
@@ -848,7 +863,17 @@ with st.sidebar:
         st.info("條件：左腳(K<20)；頸線(波段高點) K<80；紅吞黑發動。")
 
     st.divider()
+    
+    # 🚨 新增：回測條件自訂面板 🚨
+    st.subheader("⚙️ 回測出場條件設定")
+    c1, c2 = st.columns(2)
+    with c1:
+        tp_black_engulf = st.checkbox("🐻 遇到『黑吞紅』強制平倉", value=False, help="若股價出現高檔黑吞紅(開高走低吃掉昨日紅K)則立即出場")
+    with c2:
+        tp_multiplier = st.selectbox("🎯 達標測幅倍數", [1.5, 2.0, 3.0, 5.0], index=0, help="設定獲利目標為底部震幅(或承擔風險)的幾倍")
+
     st.caption("⚠️ 回測將使用上方「最低成交量」過濾。")
+    
     if st.button("🧪 策略回測"):
         st.info("阿吉正在調閱歷史檔案... ⏳")
         stock_dict = get_stock_list()
@@ -864,11 +889,13 @@ with st.sidebar:
             use_vol=filter_vol_double, use_solid_defense=use_solid_defense_param,
             use_leg_kick=use_legkick_param, use_w_bottom=use_w_bottom_param,
             min_vol_threshold=min_vol_input,
+            tp_multiplier=tp_multiplier,        # 傳入倍數
+            tp_black_engulf=tp_black_engulf     # 傳入黑吞紅選項
         )
         st.session_state["backtest_result"] = bt_df
         bt_progress.empty()
         st.success("回測完成！")
-        st.rerun() # 🚀 自動重整畫面顯示報告 🚀
+        st.rerun()
 
     # 🔥 開發日誌上鎖
     with st.expander("📅 系統開發日誌"):
@@ -877,9 +904,9 @@ with st.sidebar:
             st.write(f"**🕒 系統時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
             st.markdown("---")
             st.markdown("""
-                ### Ver 2.6a (回測報告修復版)
-                * **重大修復**：修正了「策略回測」功能無法將結果輸出至 UI 的嚴重錯誤。現在回測完成後，將在主畫面頂部即時顯示戰情儀表板。
-                * **新增功能**：加入歷史勝率自動運算邏輯，並提供完整回測報告的 CSV 下載按鈕。
+                ### Ver 2.7 (自訂停利回測版)
+                * **靈活出場機制**：新增「回測出場條件設定」面板。使用者可自由勾選是否在遇到「黑吞紅 (空頭吞噬)」型態時強制結算平倉，以此迴避高檔反轉風險。
+                * **彈性測幅倍數**：目標價改為由選單決定(支援 1.5x / 2.0x / 3.0x / 5.0x 倍風險報酬或震幅)，不再寫死於程式內，讓不同風險偏好的投資人能自由測試績效。
                 """)
         elif log_pwd != "":
             st.error("密碼錯誤")
