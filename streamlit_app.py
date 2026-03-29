@@ -12,7 +12,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 2.3 (輕量加速版)"
+VER = "ver 2.4 (固若金湯版)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -122,6 +122,84 @@ def _is_red_engulf_black(prev_open, prev_close, curr_open, curr_close):
     engulf = (curr_open <= prev_close) and (curr_close > prev_open)
     return prev_is_black and curr_is_red and engulf
 
+# --- 新增策略：🛡️ 固若金湯 (破底翻突破) ---
+def detect_solid_defense_signal(stock_df, k_series, lookback=60):
+    if len(stock_df) < 15: # 至少需要一些天數來成型
+        return False, {}
+
+    recent_df = stock_df.tail(lookback).copy()
+    idx_list = list(recent_df.index)
+    today_idx = idx_list[-1]
+
+    # 1. 找最低點 (到昨天為止的最低點，因為今天要突破)
+    past_df = recent_df.iloc[:-1]
+    if past_df.empty: return False, {}
+    
+    t_low = past_df['Low'].idxmin()
+    t_low_pos = idx_list.index(t_low)
+
+    if t_low_pos == len(idx_list) - 1: 
+        return False, {} # 最低點太近，沒有時間形成箱型和守住訊號
+
+    Daa = float(recent_df.loc[t_low, 'Low'])
+    Da = float(recent_df.loc[t_low, 'Close'])
+
+    # 2. 找箱頂 (最低點之後，到昨天為止的最高點)
+    box_period = recent_df.iloc[t_low_pos + 1 : -1]
+    if box_period.empty:
+        box_top = Da # 防呆
+    else:
+        box_top = float(box_period['High'].max())
+
+    # 3. 檢查是否有「守住」訊號
+    held_support = False
+    hold_date = None
+    hold_type = ""
+
+    for i in range(t_low_pos + 1, len(idx_list)):
+        curr_dt = idx_list[i]
+        prev_dt = idx_list[i - 1]
+
+        curr_o, curr_c = float(recent_df.loc[curr_dt, 'Open']), float(recent_df.loc[curr_dt, 'Close'])
+        prev_o, prev_c = float(recent_df.loc[prev_dt, 'Open']), float(recent_df.loc[prev_dt, 'Close'])
+
+        if curr_dt in k_series.index:
+            curr_k = float(k_series.loc[curr_dt])
+        else:
+            curr_k = 0.0
+
+        is_engulf = _is_red_engulf_black(prev_o, prev_c, curr_o, curr_c)
+
+        if is_engulf and curr_k > 20:
+            if curr_c > Da:
+                held_support = True
+                hold_date = curr_dt
+                hold_type = "守住Da"
+            elif curr_c > Daa:
+                held_support = True
+                hold_date = curr_dt
+                hold_type = "守住Daa"
+
+    if not held_support:
+        return False, {}
+
+    # 4. 檢查今天是否為進場發動點 (拉出一根紅棒，且突破箱型頂部)
+    today_o, today_c = float(recent_df.loc[today_idx, 'Open']), float(recent_df.loc[today_idx, 'Close'])
+    is_red_today = today_c > today_o
+    is_breakout = today_c > box_top
+
+    if is_red_today and is_breakout:
+        return True, {
+            "最低點日期": t_low,
+            "Da": Da,
+            "Daa": Daa,
+            "箱頂": box_top,
+            "守住日期": hold_date,
+            "守住類型": hold_type
+        }
+
+    return False, {}
+
 def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=20):
     if len(stock_df) < max(lookback + 2, 30): return False, None, None, None
     recent_df = stock_df.tail(lookback).copy()
@@ -201,7 +279,7 @@ def run_strategy_backtest(
     use_trend_up,
     use_treasure,
     use_vol,
-    use_royal,
+    use_solid_defense,
     use_leg_kick,
     use_w_bottom,
     min_vol_threshold,
@@ -215,7 +293,6 @@ def run_strategy_backtest(
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 回測下載量降回 2 年，減輕負載
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
             if data.empty: 
                 time.sleep(8)
@@ -279,7 +356,19 @@ def run_strategy_backtest(
                         stop_loss_price = 0.0
                         target_price = 0.0
 
-                        if use_w_bottom:
+                        if use_solid_defense:
+                            sub_df = full_ohlc.loc[:date].copy()
+                            sd_ok, sd_det = detect_solid_defense_signal(sub_df, k_full, lookback=60)
+                            if sd_ok:
+                                is_match = True
+                                detail_info["最低點日期"] = sd_det["最低點日期"].strftime("%m-%d")
+                                detail_info["守住日期"] = sd_det["守住日期"].strftime("%m-%d")
+                                detail_info["守住類型"] = sd_det["守住類型"]
+                                detail_info["箱頂"] = round(sd_det["箱頂"], 2)
+                                stop_loss_price = sd_det["Daa"]
+                                target_price = close_p + (close_p - stop_loss_price) * 1.5
+
+                        elif use_w_bottom:
                             sub_df = full_ohlc.loc[:date].copy()
                             w_ok, t_left, t_peak = detect_w_bottom_signal(sub_df, k_full, d_full, lookback=60)
                             if w_ok:
@@ -306,11 +395,6 @@ def run_strategy_backtest(
                                 amplitude = close_p - left_low_p
                                 target_price = close_p + (2 * amplitude)
 
-                        elif use_royal:
-                            ma30_val = float(ma30_series.iloc[idx])
-                            ma60_val = float(ma60_series.iloc[idx])
-                            if (close_p > ma30_val) and (ma30_val > ma60_val) and (ma60_val > ma200_val):
-                                is_match = True
                         else:
                             low_p = float(l_series.iloc[idx])
                             ma_val_20ago = float(ma200_series.iloc[idx - 20])
@@ -339,33 +423,6 @@ def run_strategy_backtest(
                         result_status = "觀察中"
                         is_watching = False
                         if days_after_signal < 1: is_watching = True
-                        
-                        elif use_royal:
-                            is_watching = True
-                            current_price = float(c_series.iloc[-1])
-                            final_profit_pct = (current_price - close_p) / close_p * 100
-                            check_days = min(days_after_signal, OBSERVE_DAYS)
-                            for d in range(1, check_days + 1):
-                                day_idx = idx + d
-                                day_high = float(h_series.iloc[day_idx])
-                                day_close = float(c_series.iloc[day_idx])
-                                day_ma200 = float(ma200_series.iloc[day_idx])
-                                if day_high >= close_p * 1.10:
-                                    final_profit_pct = 10.0
-                                    result_status = "Win (止盈出場) 🐎"
-                                    is_watching = False
-                                    break
-                                if day_close < day_ma200:
-                                    final_profit_pct = (day_close - close_p) / close_p * 100
-                                    result_status = "Loss (破線停損) 🛑"
-                                    is_watching = False
-                                    break
-                            if is_watching:
-                                if days_after_signal >= OBSERVE_DAYS:
-                                    end_close = float(c_series.iloc[idx + OBSERVE_DAYS])
-                                    final_profit_pct = (end_close - close_p) / close_p * 100
-                                    result_status = "Win (期滿獲利)" if final_profit_pct > 0 else "Loss (期滿虧損)"
-                                    is_watching = False
                         else:
                             MAX_HOLD_DAYS = 30
                             check_days = min(days_after_signal, MAX_HOLD_DAYS)
@@ -381,13 +438,13 @@ def run_strategy_backtest(
                                 prev_k = float(k_full.iloc[curr_idx - 1])
                                 prev_d = float(d_full.iloc[curr_idx - 1])
                                 
-                                if curr_c < stop_loss_price:
+                                if stop_loss_price > 0 and curr_c < stop_loss_price:
                                     final_profit_pct = (curr_c - close_p) / close_p * 100
                                     is_watching = False
                                     result_status = "Loss (破防守) 🛑"
                                     break
                                 
-                                if curr_h >= target_price:
+                                if target_price > 0 and curr_h >= target_price:
                                     final_profit_pct = (target_price - close_p) / close_p * 100
                                     is_watching = False
                                     result_status = "Win (達標停利) 🎯"
@@ -420,13 +477,17 @@ def run_strategy_backtest(
                             "損益(%)": round(final_profit_pct, 2),
                             "結果": "觀察中" if is_watching else result_status,
                         }
+                        if use_solid_defense:
+                            record["最低點"] = detail_info.get("最低點日期", "")
+                            record["守住日期"] = detail_info.get("守住日期", "")
+                            record["守住類型"] = detail_info.get("守住類型", "")
+                            record["箱頂"] = detail_info.get("箱頂", "")
                         if use_leg_kick:
                             record["KD低點"] = detail_info.get("KD低點", "")
                             record["KD金叉"] = detail_info.get("KD金叉", "")
                         if use_w_bottom:
                             record["左腳"] = detail_info.get("左腳日期", "")
                         results.append(record)
-                        if use_royal: break
                 except: continue
         except: pass
         progress = (i + 1) / total_batches
@@ -453,7 +514,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 日常下載量從 2y 縮減回 1y，大幅提升速度並降低封鎖率
             data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
             
             msg = f"Batch {i+1}: 嘗試下載 {len(batch)} 檔"
@@ -521,14 +581,15 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
                             cond_past_down = (my_recent_c.iloc[:-1] < my_recent_ma.iloc[:-1]).any()
                             if cond_today_up and cond_past_down: is_treasure = True
 
-                        is_royal = (price > ma30) and (ma30 > ma60) and (ma60 > ma200)
-
                         stock_df = pd.DataFrame({
                             "Open": df_o[ticker], "Close": df_c[ticker],
                             "High": df_h[ticker], "Low": df_l[ticker],
                         }).dropna()
 
                         k_val, d_val = 0.0, 0.0
+                        
+                        is_solid_defense = False
+                        sd_details = {}
                         is_leg_kick = False
                         leg_kick_date = None
                         t_low = None
@@ -542,11 +603,19 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
                             k_val = float(k_series.iloc[-1])
                             d_val = float(d_series.iloc[-1])
 
+                            # 固若金湯策略
+                            sd_ok, sd_det = detect_solid_defense_signal(stock_df, k_series, lookback=60)
+                            if sd_ok:
+                                is_solid_defense = True
+                                sd_details = sd_det
+
+                            # 蓄勢待發
                             is_leg_kick, leg_kick_date, t_low, t_cross = detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=20)
                             if is_leg_kick:
                                 day_diff = (current_market_date - leg_kick_date).days
                                 if day_diff > 5: is_leg_kick = False
 
+                            # 光神腳
                             w_ok, t_left, t_peak = detect_w_bottom_signal(stock_df, k_series, d_series, lookback=60)
                             if w_ok:
                                 is_w_bottom = True
@@ -577,7 +646,11 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
                             "D值": float(d_val),
                             "位置": "🟢生命線上" if price >= ma200 else "🔴生命線下",
                             "浴火重生": is_treasure,
-                            "皇冠特選": is_royal,
+                            "固若金湯": is_solid_defense,
+                            "最低點日期": sd_details.get("最低點日期", "").strftime("%Y-%m-%d") if sd_details else "",
+                            "守住日期": sd_details.get("守住日期", "").strftime("%Y-%m-%d") if sd_details else "",
+                            "守住類型": sd_details.get("守住類型", ""),
+                            "箱頂": round(sd_details.get("箱頂", 0.0), 2) if sd_details else 0.0,
                             "蓄勢待發": is_leg_kick,
                             "蓄勢日期": leg_kick_date.strftime("%Y-%m-%d") if leg_kick_date else "",
                             "KD低點": t_low.strftime("%Y-%m-%d") if t_low else "",
@@ -600,7 +673,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
 
 def plot_stock_chart(ticker, name, strategy_mode=""):
     try:
-        # 繪圖也改回抓 1y
         df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
@@ -711,11 +783,11 @@ with st.sidebar:
     min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
     st.subheader("策略選擇")
     
-    # 隱藏黃金長線滿分策略
+    # 變更策略名稱
     strategy_mode = st.radio("選擇篩選策略：", (
         "🛡️ 生命線保衛戰 (反彈/支撐)", 
         "🔥 起死回生 (Da來守住)", 
-        "🐎 多頭馬車發動 (多頭排列)", 
+        "🛡️ 固若金湯 (破底翻突破)", 
         "🏹 蓄勢待發 (KD+紅吞)", 
         "⚡ 光神腳 (紅吞+左腳KD<80)"
     ))
@@ -735,9 +807,8 @@ with st.sidebar:
     elif strategy_mode == "🔥 起死回生 (Da來守住)":
         st.info("ℹ️ 過去7日跌破，今日站回生命線。")
         filter_vol_double = st.checkbox("出量確認", value=False)
-    elif strategy_mode == "🐎 多頭馬車發動 (多頭排列)":
-        st.info("ℹ️ 股價 > 30MA > 60MA > 200MA")
-        filter_vol_double = st.checkbox("出量確認", value=False)
+    elif strategy_mode == "🛡️ 固若金湯 (破底翻突破)":
+        st.info("條件：尋找波段底部 Da(收盤價)/Daa(最低價)。出現紅吞且 KD>20 確認守住底部後，今日以紅 K 強勢突破反彈高點（箱頂）。")
     elif strategy_mode == "🏹 蓄勢待發 (KD+紅吞)":
         st.info("條件：K<20後金叉，金叉後3日內發動(K>=20, 紅吞黑)。")
     elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)":
@@ -750,14 +821,14 @@ with st.sidebar:
         stock_dict = get_stock_list()
         bt_progress = st.progress(0, text="回測中...")
         use_treasure_param = (strategy_mode == "🔥 起死回生 (Da來守住)")
-        use_royal_param = (strategy_mode == "🐎 多頭馬車發動 (多頭排列)")
+        use_solid_defense_param = (strategy_mode == "🛡️ 固若金湯 (破底翻突破)")
         use_legkick_param = (strategy_mode == "🏹 蓄勢待發 (KD+紅吞)")
         use_w_bottom_param = (strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)")
 
         bt_df = run_strategy_backtest(
             stock_dict, bt_progress, mode=strategy_mode,
             use_trend_up=filter_trend_up, use_treasure=use_treasure_param,
-            use_vol=filter_vol_double, use_royal=use_royal_param,
+            use_vol=filter_vol_double, use_solid_defense=use_solid_defense_param,
             use_leg_kick=use_legkick_param, use_w_bottom=use_w_bottom_param,
             min_vol_threshold=min_vol_input,
         )
@@ -772,10 +843,10 @@ with st.sidebar:
             st.write(f"**🕒 系統時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
             st.markdown("---")
             st.markdown("""
-                ### Ver 2.3 (輕量加速版)
-                * **效能優化**：暫時隱藏長週期(284MA)策略，將資料下載區間從 2 年大幅縮減至 1 年 (Period=1y)。
-                * **運算減壓**：移除背景過多重型均線計算，大幅提高處理與繪圖速度，同時有效迴避 Yahoo API 阻擋機制。
-                * **完整市場覆蓋**：維持上市與上櫃雙市場抓取，總掃描家數保持在最豐富狀態。
+                ### Ver 2.4 (固若金湯版)
+                * **新策略上線**：移除舊有多頭馬車，替換為全新的「固若金湯 (破底翻突破)」策略。
+                * **嚴謹底部邏輯**：智能找尋區間底部 (Da/Daa)，確認「守住訊號(紅吞+KD>20)」後，精準抓取帶量紅K突破箱型頂部的進場起漲點。
+                * **資訊面板擴充**：策略資訊列詳細揭露「落底時間」、「箱型頂部價格」、「守住類型 (Da/Daa)」。
                 """)
         elif log_pwd != "":
             st.error("密碼錯誤")
@@ -791,8 +862,8 @@ if st.session_state["master_df"] is not None:
 
     if strategy_mode == "🔥 起死回生 (Da來守住)":
         df = df[df["浴火重生"] == True]
-    elif strategy_mode == "🐎 多頭馬車發動 (多頭排列)":
-        df = df[df["皇冠特選"] == True] if "皇冠特選" in df.columns else df.iloc[0:0]
+    elif strategy_mode == "🛡️ 固若金湯 (破底翻突破)":
+        df = df[df["固若金湯"] == True] if "固若金湯" in df.columns else df.iloc[0:0]
     elif strategy_mode == "🏹 蓄勢待發 (KD+紅吞)":
         df = df[df["蓄勢待發"] == True] if "蓄勢待發" in df.columns else df.iloc[0:0]
     elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)":
@@ -816,12 +887,12 @@ if st.session_state["master_df"] is not None:
 
         # 固定版面顯示欄位
         fixed_display_cols = ["代號", "名稱", "產業", "收盤價", "生命線", "乖離率(%)", "位置", "KD值", "成交量(張)"]
-        if strategy_mode == "🐎 多頭馬車發動 (多頭排列)":
-            fixed_display_cols = ["代號", "名稱", "產業", "收盤價", "MA30", "MA60", "生命線", "KD值", "成交量(張)"]
+        if strategy_mode == "🛡️ 固若金湯 (破底翻突破)":
+            fixed_display_cols = ["代號", "名稱", "產業", "收盤價", "箱頂", "守住類型", "生命線", "KD值", "成交量(張)"]
 
         for col in fixed_display_cols:
             if col not in df.columns:
-                if col in ['名稱', '產業', '位置', 'KD值']: df[col] = "-"
+                if col in ['名稱', '產業', '位置', 'KD值', '守住類型']: df[col] = "-"
                 else: df[col] = 0
 
         df = df.sort_values(by="成交量", ascending=False)
@@ -845,7 +916,15 @@ if st.session_state["master_df"] is not None:
             plot_stock_chart(selected_row["完整代號"], selected_row["名稱"], strategy_mode)
 
             # ✅ 在詳細頁揭露隱藏資訊
-            if strategy_mode == "🏹 蓄勢待發 (KD+紅吞)":
+            if strategy_mode == "🛡️ 固若金湯 (破底翻突破)":
+                st.markdown("---")
+                st.caption("🛡️ 固若金湯策略詳細數據:")
+                c1, c2, c3 = st.columns(3)
+                with c1: st.info(f"📉 落底點 (Da/Daa)\n\n**{selected_row.get('最低點日期', '-')}**")
+                with c2: st.warning(f"🛡️ 守住確認日\n\n**{selected_row.get('守住日期', '-')} ({selected_row.get('守住類型', '-')})**")
+                with c3: st.success(f"🚀 突破箱頂價位\n\n**{selected_row.get('箱頂', '-')}**")
+
+            elif strategy_mode == "🏹 蓄勢待發 (KD+紅吞)":
                 st.markdown("---")
                 st.caption("🏹 蓄勢待發策略詳細數據:")
                 k_col1, k_col2, k_col3 = st.columns(3)
