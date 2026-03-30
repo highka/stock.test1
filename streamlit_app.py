@@ -12,7 +12,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 2.7a (移動停利進化版)"
+VER = "ver 2.8 (實戰精準報價版)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -125,7 +125,6 @@ def _is_red_engulf_black(prev_open, prev_close, curr_open, curr_close):
 def _is_black_engulf_red(prev_open, prev_close, curr_open, curr_close):
     prev_is_red = prev_close > prev_open
     curr_is_black = curr_close < curr_open
-    # 黑吞紅：今日開高走低，收盤跌破昨日開盤
     engulf = (curr_open >= prev_close) and (curr_close <= prev_open)
     return prev_is_red and curr_is_black and engulf
 
@@ -204,13 +203,16 @@ def detect_solid_defense_signal(stock_df, k_series, lookback=60):
         
     return False, {}
 
-def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=20):
+# 修改：傳入算好的 k_series, d_series，不內部重算以保證使用還原KD
+def detect_leg_kick_signal(stock_df, k_series, d_series, lookback=60, trigger_days=3, kd_threshold=20):
     if len(stock_df) < max(lookback + 2, 30): return False, None, None, None
     recent_df = stock_df.tail(lookback).copy()
     if len(recent_df) < 20: return False, None, None, None
 
-    k_series, d_series = calculate_kd_series(recent_df)
-    t1 = k_series[k_series < kd_threshold].last_valid_index()
+    k_sub = k_series.loc[recent_df.index]
+    d_sub = d_series.loc[recent_df.index]
+
+    t1 = k_sub[k_sub < kd_threshold].last_valid_index()
     if t1 is None: return False, None, None, None
     oversold_close = float(recent_df.loc[t1, "Close"])
 
@@ -220,7 +222,7 @@ def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=2
     for i in range(t1_pos + 1, len(idx_list)):
         dt = idx_list[i]
         prev_dt = idx_list[i - 1]
-        if (k_series.loc[prev_dt] <= d_series.loc[prev_dt]) and (k_series.loc[dt] > d_series.loc[dt]):
+        if (k_sub.loc[prev_dt] <= d_sub.loc[prev_dt]) and (k_sub.loc[dt] > d_sub.loc[dt]):
             t_cross = dt
             break
     
@@ -232,7 +234,7 @@ def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=2
     for i in range(cross_pos, end_pos + 1):
         dt = idx_list[i]
         if i == 0: continue
-        if float(k_series.loc[dt]) < kd_threshold: continue
+        if float(k_sub.loc[dt]) < kd_threshold: continue
 
         prev_row = recent_df.iloc[i - 1]
         curr_row = recent_df.iloc[i]
@@ -244,6 +246,7 @@ def detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=2
 
     return False, None, t1, t_cross
 
+# 修改：傳入算好的 k_series, d_series
 def detect_w_bottom_signal(stock_df, k_series, d_series, lookback=60):
     if len(stock_df) < 30: return False, None, None
     valid_idx = stock_df.index.intersection(k_series.index)
@@ -305,20 +308,26 @@ def run_strategy_backtest(
                 if data.empty: continue
                 
             try:
-                df_o, df_c = data["Open"], data["Close"]
-                df_v, df_l, df_h = data["Volume"], data["Low"], data["High"]
+                # 解決精度浮點數異常 (72.1997 問題)
+                df_o = data["Open"].round(2)
+                df_c = data["Close"].round(2)
+                df_h = data["High"].round(2)
+                df_l = data["Low"].round(2)
+                df_v = data["Volume"]
+                df_ac = data["Adj Close"] # 保留未四捨五入的還原值給KD用
             except KeyError: continue
 
             if isinstance(df_c, pd.Series):
                 df_o = df_o.to_frame(name=batch[0])
                 df_c = df_c.to_frame(name=batch[0])
-                df_v = df_v.to_frame(name=batch[0])
-                df_l = df_l.to_frame(name=batch[0])
                 df_h = df_h.to_frame(name=batch[0])
+                df_l = df_l.to_frame(name=batch[0])
+                df_v = df_v.to_frame(name=batch[0])
+                df_ac = df_ac.to_frame(name=batch[0])
 
-            ma200_df = df_c.rolling(window=200).mean()
-            ma30_df = df_c.rolling(window=30).mean()
-            ma60_df = df_c.rolling(window=60).mean()
+            ma200_df = df_c.rolling(window=200).mean().round(2)
+            ma30_df = df_c.rolling(window=30).mean().round(2)
+            ma60_df = df_c.rolling(window=60).mean().round(2)
             scan_window = df_c.index[-90:]
 
             for ticker in df_c.columns:
@@ -328,20 +337,29 @@ def run_strategy_backtest(
                     v_series = df_v[ticker].reindex(c_series.index).dropna()
                     l_series = df_l[ticker].reindex(c_series.index).dropna()
                     h_series = df_h[ticker].reindex(c_series.index).dropna()
-                    ma200_series = ma200_df[ticker].reindex(c_series.index)
-                    ma30_series = ma30_df[ticker].reindex(c_series.index)
-                    ma60_series = ma60_df[ticker].reindex(c_series.index)
+                    ac_series = df_ac[ticker].reindex(c_series.index).dropna()
+
+                    # 計算專供 KD 使用的還原 OHLC
+                    adj_ratio = ac_series / c_series
+                    adj_high = h_series * adj_ratio
+                    adj_low = l_series * adj_ratio
 
                     stock_info = stock_dict.get(ticker, {})
                     stock_name = stock_info.get("name", ticker)
                     stock_industry = stock_info.get("group", "")
                     total_len = len(c_series)
 
+                    # 真實價格 DataFrame (給策略使用)
                     full_ohlc = pd.DataFrame({
                         "Open": o_series, "Close": c_series, "High": h_series, "Low": l_series
                     }).dropna()
 
-                    k_full, d_full = calculate_kd_series(full_ohlc)
+                    # 還原價格 DataFrame (專供 KD 使用)
+                    adj_ohlc = pd.DataFrame({
+                        "Open": o_series * adj_ratio, "High": adj_high, "Low": adj_low, "Close": ac_series
+                    }).dropna()
+
+                    k_full, d_full = calculate_kd_series(adj_ohlc)
 
                     for date in scan_window:
                         if date not in c_series.index: continue
@@ -386,7 +404,7 @@ def run_strategy_backtest(
 
                         elif use_leg_kick:
                             sub_df = full_ohlc.loc[:date].copy()
-                            ok, trig_dt, t_low, t_cross = detect_leg_kick_signal(sub_df, lookback=60, trigger_days=3, kd_threshold=20)
+                            ok, trig_dt, t_low, t_cross = detect_leg_kick_signal(sub_df, k_full, d_full, lookback=60, trigger_days=3, kd_threshold=20)
                             if ok and trig_dt == date:
                                 is_match = True
                                 detail_info["KD低點"] = t_low.strftime("%m-%d") if t_low else ""
@@ -426,13 +444,13 @@ def run_strategy_backtest(
                         final_profit_pct = 0.0
                         result_status = "觀察中"
                         
-                        target_reached = False # 紀錄是否已經達標警戒線
+                        target_reached = False 
                         is_watching = False
                         
                         if days_after_signal < 1: 
                             is_watching = True
                         else:
-                            MAX_HOLD_DAYS = 45 # 為了讓獲利奔跑，把上限拉寬到 45 天
+                            MAX_HOLD_DAYS = 45 
                             check_days = min(days_after_signal, MAX_HOLD_DAYS)
                             is_watching = True
                             
@@ -451,34 +469,28 @@ def run_strategy_backtest(
                                 prev_k = float(k_full.iloc[curr_idx - 1])
                                 prev_d = float(d_full.iloc[curr_idx - 1])
                                 
-                                # 追蹤是否達標
                                 if target_price > 0 and curr_h >= target_price:
                                     target_reached = True
                                 
-                                # 1. 絕對停損判斷 (最優先)
                                 if stop_loss_price > 0 and curr_c < stop_loss_price:
                                     final_profit_pct = (curr_c - close_p) / close_p * 100
                                     is_watching = False
                                     result_status = "Loss (破防守) 🛑"
                                     break
                                 
-                                # 2. 移動停利：如果已經達標
                                 if target_reached:
                                     if tp_black_engulf:
-                                        # 達標後不走，繼續等「黑吞紅」才走
                                         if _is_black_engulf_red(prev_o, prev_c, curr_o, curr_c):
                                             final_profit_pct = (curr_c - close_p) / close_p * 100
                                             is_watching = False
                                             result_status = f"Win (達標後黑吞紅) 🐻🎯"
                                             break
                                     else:
-                                        # 傳統模式：碰到目標價當天立刻平倉
                                         final_profit_pct = (target_price - close_p) / close_p * 100
                                         is_watching = False
                                         result_status = f"Win (達標 {tp_multiplier}x) 🎯"
                                         break
                                     
-                                # 3. 動態防護：KD 高檔死叉 (不管達不達標都適用)
                                 if (prev_k > 80) and (prev_k >= prev_d) and (curr_k < curr_d):
                                     final_profit_pct = (curr_c - close_p) / close_p * 100
                                     is_watching = False
@@ -562,8 +574,13 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
 
             if not data.empty:
                 try:
-                    df_o, df_c = data["Open"], data["Close"]
-                    df_h, df_l, df_v = data["High"], data["Low"], data["Volume"]
+                    # 強制修復小數點精度
+                    df_o = data["Open"].round(2)
+                    df_c = data["Close"].round(2)
+                    df_h = data["High"].round(2)
+                    df_l = data["Low"].round(2)
+                    df_v = data["Volume"]
+                    df_ac = data["Adj Close"]
                 except KeyError: continue
 
                 if isinstance(df_c, pd.Series):
@@ -572,10 +589,11 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
                     df_h = df_h.to_frame(name=batch[0])
                     df_l = df_l.to_frame(name=batch[0])
                     df_v = df_v.to_frame(name=batch[0])
+                    df_ac = df_ac.to_frame(name=batch[0])
 
-                ma200_df = df_c.rolling(window=200).mean()
-                ma30_df = df_c.rolling(window=30).mean()
-                ma60_df = df_c.rolling(window=60).mean()
+                ma200_df = df_c.rolling(window=200).mean().round(2)
+                ma30_df = df_c.rolling(window=30).mean().round(2)
+                ma60_df = df_c.rolling(window=60).mean().round(2)
                 
                 last_price_series = df_c.iloc[-1]
                 last_ma200_series = ma200_df.iloc[-1]
@@ -609,9 +627,22 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
                             cond_past_down = (my_recent_c.iloc[:-1] < my_recent_ma.iloc[:-1]).any()
                             if cond_today_up and cond_past_down: is_treasure = True
 
+                        c_series = df_c[ticker].dropna()
+                        o_series = df_o[ticker].reindex(c_series.index).dropna()
+                        l_series = df_l[ticker].reindex(c_series.index).dropna()
+                        h_series = df_h[ticker].reindex(c_series.index).dropna()
+                        ac_series = df_ac[ticker].reindex(c_series.index).dropna()
+
+                        adj_ratio = ac_series / c_series
+                        adj_high = h_series * adj_ratio
+                        adj_low = l_series * adj_ratio
+
                         stock_df = pd.DataFrame({
-                            "Open": df_o[ticker], "Close": df_c[ticker],
-                            "High": df_h[ticker], "Low": df_l[ticker],
+                            "Open": o_series, "Close": c_series, "High": h_series, "Low": l_series
+                        }).dropna()
+                        
+                        adj_ohlc = pd.DataFrame({
+                            "Open": o_series * adj_ratio, "High": adj_high, "Low": adj_low, "Close": ac_series
                         }).dropna()
 
                         k_val, d_val = 0.0, 0.0
@@ -627,30 +658,30 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
                         w_peak_date = None
 
                         if len(stock_df) >= 20:
-                            k_series, d_series = calculate_kd_series(stock_df)
-                            k_val = float(k_series.iloc[-1])
-                            d_val = float(d_series.iloc[-1])
+                            k_full, d_full = calculate_kd_series(adj_ohlc)
+                            k_val = float(k_full.iloc[-1])
+                            d_val = float(d_full.iloc[-1])
 
                             # 固若金湯策略
-                            sd_ok, sd_det = detect_solid_defense_signal(stock_df, k_series, lookback=60)
+                            sd_ok, sd_det = detect_solid_defense_signal(stock_df, k_full, lookback=60)
                             if sd_ok:
                                 is_solid_defense = True
                                 sd_details = sd_det
 
                             # 蓄勢待發
-                            is_leg_kick, leg_kick_date, t_low, t_cross = detect_leg_kick_signal(stock_df, lookback=60, trigger_days=3, kd_threshold=20)
+                            is_leg_kick, leg_kick_date, t_low, t_cross = detect_leg_kick_signal(stock_df, k_full, d_full, lookback=60, trigger_days=3, kd_threshold=20)
                             if is_leg_kick:
                                 day_diff = (current_market_date - leg_kick_date).days
                                 if day_diff > 5: is_leg_kick = False
 
                             # 光神腳
-                            w_ok, t_left, t_peak = detect_w_bottom_signal(stock_df, k_series, d_series, lookback=60)
+                            w_ok, t_left, t_peak = detect_w_bottom_signal(stock_df, k_full, d_full, lookback=60)
                             if w_ok:
                                 is_w_bottom = True
                                 w_left_date = t_left
                                 w_peak_date = t_peak
                         else:
-                            if len(stock_df) >= 9: k_val, d_val = calculate_kd_values(stock_df)
+                            if len(stock_df) >= 9: k_val, d_val = calculate_kd_values(adj_ohlc)
 
                         bias = ((price - ma200) / ma200) * 100
                         stock_info = stock_dict.get(ticker)
@@ -707,10 +738,12 @@ def plot_stock_chart(ticker, name, strategy_mode=""):
         if df.empty:
             st.error("無法取得有效數據")
             return
-
-        df["200MA"] = df["Close"].rolling(window=200).mean()
-        df["30MA"] = df["Close"].rolling(window=30).mean()
-        df["60MA"] = df["Close"].rolling(window=60).mean()
+            
+        # 圖表顯示也套用嚴格小數點四捨五入
+        df["Close"] = df["Close"].round(2)
+        df["200MA"] = df["Close"].rolling(window=200).mean().round(2)
+        df["30MA"] = df["Close"].rolling(window=30).mean().round(2)
+        df["60MA"] = df["Close"].rolling(window=60).mean().round(2)
         
         plot_df = df.tail(150).copy() 
         plot_df["DateStr"] = plot_df.index.strftime("%Y-%m-%d")
@@ -869,7 +902,6 @@ with st.sidebar:
 
     st.divider()
     
-    # 🚨 新增：回測條件自訂面板 🚨
     st.subheader("⚙️ 回測出場條件設定")
     c1, c2 = st.columns(2)
     with c1:
@@ -909,9 +941,9 @@ with st.sidebar:
             st.write(f"**🕒 系統時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
             st.markdown("---")
             st.markdown("""
-                ### Ver 2.7a (移動停利進化版)
-                * **移動停利追蹤**：將「達標測幅」從靜態平倉線升級為「動態啟動線」。股價達標後不會馬上賣出，而是緊盯「黑吞紅 (空頭吞噬)」訊號，實現「讓獲利奔跑」的右側交易精神。
-                * **更寬廣的波段空間**：為了配合移動停利的長波段特性，回測最高持倉天數由 30 天展延至 45 天。
+                ### Ver 2.8 (實戰精準報價版)
+                * **資料精度強制校正**：針對 Yahoo Finance 台股報價小數點亂數問題(例如 72.1997)，在下載源頭強制執行小數點第二位修整 (.round(2))，徹底還原真實市場跳動單位。
+                * **技術指標雙軌制**：為了完美吻合實戰，將 K 棒價格與技術指標脫鉤。所有策略判定(均線、吞噬、箱型突破)一律採用「未還原真實價格」，保障心理關卡準確度；而 KD 指標則獨家在背景調用「除權息還原日線」進行運算，徹底杜絕除權息跳空造成的假死叉干擾！
                 """)
         elif log_pwd != "":
             st.error("密碼錯誤")
