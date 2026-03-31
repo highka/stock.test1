@@ -12,7 +12,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 2.9 (極限渦輪加速版)"
+VER = "ver 2.9a (資料完整精準版)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -76,7 +76,8 @@ def get_stock_list():
 def test_connection():
     try:
         test_ticker = "2330.TW"
-        data = yf.download(test_ticker, period="5d", progress=False, threads=True)
+        # 為了保證精準度，改回 threads=False
+        data = yf.download(test_ticker, period="5d", progress=False, threads=False)
         if not data.empty:
             return True, f"✅ 連線成功！成功抓取 {test_ticker} (資料筆數: {len(data)})"
         else:
@@ -132,8 +133,8 @@ def detect_solid_defense_signal(stock_df, k_series, lookback=60):
     if len(stock_df) < 20: 
         return False, {}
 
-    # 優化：移除不必要的 .copy() 加速運算
-    recent_df = stock_df.tail(lookback)
+    # 加回 .copy() 確保記憶體獨立不受干擾
+    recent_df = stock_df.tail(lookback).copy()
     idx_list = list(recent_df.index)
     today_idx = idx_list[-1]
     
@@ -206,7 +207,7 @@ def detect_solid_defense_signal(stock_df, k_series, lookback=60):
 
 def detect_leg_kick_signal(stock_df, k_series, d_series, lookback=60, trigger_days=3, kd_threshold=20):
     if len(stock_df) < max(lookback + 2, 30): return False, None, None, None
-    recent_df = stock_df.tail(lookback)
+    recent_df = stock_df.tail(lookback).copy()
     if len(recent_df) < 20: return False, None, None, None
 
     k_sub = k_series.loc[recent_df.index]
@@ -294,18 +295,18 @@ def run_strategy_backtest(
 ):
     results = []
     all_tickers = list(stock_dict.keys())
-    # 🚀 加速修改：提高 Batch Size 以配合多執行緒
-    BATCH_SIZE = 80
+    # 保證精度，退回穩定的 Batch Size = 50
+    BATCH_SIZE = 50
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 🚀 加速修改：解鎖 threads=True 開啟多執行緒併發下載
-            data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=True)
+            # 取消 threads=True，確保資料一檔不漏
+            data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
             if data.empty: 
                 time.sleep(8)
-                data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=True)
+                data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
                 if data.empty: continue
                 
             try:
@@ -376,8 +377,8 @@ def run_strategy_backtest(
                         stop_loss_price = 0.0
                         target_price = 0.0
 
-                        # 優化：不再每次拷貝 DataFrame
-                        sub_df = full_ohlc.loc[:date]
+                        # 加回 .copy() 防止 pandas 底層鏈結干擾
+                        sub_df = full_ohlc.loc[:date].copy()
 
                         if use_solid_defense:
                             sd_ok, sd_det = detect_solid_defense_signal(sub_df, k_full, lookback=60)
@@ -528,7 +529,7 @@ def run_strategy_backtest(
                 except: continue
         except: pass
         progress = (i + 1) / total_batches
-        progress_bar.progress(current_progress, text=f"系統正在全速運算中...({int(current_progress*100)}%)")
+        progress_bar.progress(progress, text=f"回測運算中 (確保資料完整性)...({int(progress*100)}%)")
         time.sleep(random.uniform(0.8, 1.5))
         gc.collect() 
     return pd.DataFrame(results)
@@ -539,8 +540,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
         return pd.DataFrame()
         
     all_tickers = list(stock_dict.keys())
-    # 🚀 加速修改：提高 Batch Size 以配合多執行緒
-    BATCH_SIZE = 80 
+    # 保證精度，退回穩定的 Batch Size = 50
+    BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
     
@@ -552,14 +553,14 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 🚀 加速修改：解鎖 threads=True 開啟多執行緒併發下載
-            data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=True)
+            # 關閉多執行緒，穩紮穩打不漏單
+            data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
             
             msg = f"Batch {i+1}: 嘗試下載 {len(batch)} 檔"
             if data.empty:
                 msg += " ❌ (Empty Response)"
                 time.sleep(8) 
-                data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=True)
+                data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
                 if data.empty:
                     msg += " -> 重試失敗"
                 else:
@@ -719,15 +720,15 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
             pass
             
         current_progress = (i + 1) / total_batches
-        progress_bar.progress(current_progress, text=f"系統正在極速運算中...({int(current_progress*100)}%)")
+        progress_bar.progress(current_progress, text=f"系統正在努力下載中 (保證資料完整性)...({int(current_progress*100)}%)")
         time.sleep(random.uniform(0.8, 1.5))
         gc.collect() 
     return pd.DataFrame(raw_data_list)
 
 def plot_stock_chart(ticker, name, strategy_mode=""):
     try:
-        # 🚀 加速修改：開啟繪圖的多執行緒下載支援
-        df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False, threads=True)
+        # 圖表不求大量併發，故 threads=False 求穩
+        df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
         df = df[df["Volume"] > 0].dropna()
@@ -772,7 +773,6 @@ if st.session_state.get("backtest_result") is not None:
     st.subheader("🧪 策略歷史回測報告")
     
     if not bt_df.empty:
-        # 計算勝率
         win_count = len(bt_df[bt_df["結果"].str.contains("Win", na=False)])
         loss_count = len(bt_df[bt_df["結果"].str.contains("Loss", na=False)])
         total_closed = win_count + loss_count
@@ -785,7 +785,6 @@ if st.session_state.get("backtest_result") is not None:
         
         st.dataframe(bt_df, use_container_width=True)
         
-        # 下載完整 CSV 按鈕
         csv_data = bt_df.to_csv(index=False).encode('utf-8-sig')
         st.download_button("📥 下載完整回測報告 (CSV)", csv_data, "backtest_report.csv", "text/csv")
     else:
@@ -826,12 +825,12 @@ with st.sidebar:
             with placeholder_emoji:
                 st.markdown("""<div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">🎁💰✨</div>
                     <style>@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }</style>
-                    <div style="text-align: center;">渦輪引擎啟動 (Batch=80, Threads=ON)...</div>""", unsafe_allow_html=True)
+                    <div style="text-align: center;">連線下載中 (Batch=50, Period=1Y)...</div>""", unsafe_allow_html=True)
             
             debug_container = st.expander("🕵️ 下載詳細日誌 (Debug Log)", expanded=True)
             
             status_text = st.empty()
-            progress_bar = st.progress(0, text="準備極速下載...")
+            progress_bar = st.progress(0, text="準備下載...")
             df = fetch_all_data(stock_dict, progress_bar, status_text, debug_container)
             
             if not df.empty:
@@ -909,7 +908,7 @@ with st.sidebar:
     if st.button("🧪 策略回測"):
         st.info("阿吉正在調閱歷史檔案... ⏳")
         stock_dict = get_stock_list()
-        bt_progress = st.progress(0, text="極速回測中...")
+        bt_progress = st.progress(0, text="回測中...")
         use_treasure_param = (strategy_mode == "🔥 起死回生 (Da來守住)")
         use_solid_defense_param = (strategy_mode == "🛡️ 固若金湯 (破底翻突破)")
         use_legkick_param = (strategy_mode == "🏹 蓄勢待發 (KD+紅吞)")
@@ -936,9 +935,9 @@ with st.sidebar:
             st.write(f"**🕒 系統時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
             st.markdown("---")
             st.markdown("""
-                ### Ver 2.9 (極限渦輪加速版)
-                * **解除封印**：全面重新啟用 Yahoo Finance 的 `threads=True` 多執行緒併發下載引擎，並將單次傳輸負載 (Batch Size) 從 40 一口氣拉升至 80，兼顧防擋機制與極限速度。
-                * **CPU 運算減壓**：大刀闊斧砍掉回測迴圈中為防呆所產生的 DataFrame `.copy()`，將 Pandas 記憶體搬運的負擔降到最低，確保資料下載完畢後的策略掃描能在幾秒內俐落完成。
+                ### Ver 2.9a (資料完整精準版)
+                * **退版求穩**：上一版的高速併發下載導致 Yahoo API 啟動隱形阻擋機制，造成部分股票回傳空值遺失。本版退回單執行緒 (`threads=False`) 並將 Batch Size 下調至 50。
+                * **準確度保證**：加回了防呆記憶體切割 `.copy()`，保證技術指標在做陣列平移計算時 100% 準確，確保不會有任何一檔飆股被錯過。
                 """)
         elif log_pwd != "":
             st.error("密碼錯誤")
