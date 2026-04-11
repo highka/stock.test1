@@ -12,7 +12,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 2.9d (回測精準修復版)"
+VER = "ver 2.9e (修復回測當機版)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -184,7 +184,6 @@ def detect_solid_defense_signal(stock_df, k_series, lookback=60):
         curr_c = float(recent_df.loc[curr_dt, 'Close'])
         prev_o = float(recent_df.loc[prev_dt, 'Open'])
         prev_c = float(recent_df.loc[prev_dt, 'Close'])
-        # 安全取值，避免 KeyError
         curr_k = float(k_series.get(curr_dt, 50.0))
         
         is_engulf = _is_red_engulf_black(prev_o, prev_c, curr_o, curr_c)
@@ -209,7 +208,6 @@ def detect_leg_kick_signal(stock_df, k_series, d_series, lookback=60, trigger_da
     recent_df = stock_df.tail(lookback).copy()
     if len(recent_df) < 20: return False, None, None, None
 
-    # 安全取交集，避免缺失日期報錯
     valid_idx = recent_df.index.intersection(k_series.index)
     if len(valid_idx) < 2: return False, None, None, None
     recent_df = recent_df.loc[valid_idx]
@@ -310,12 +308,10 @@ def run_strategy_backtest(
                 data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
                 if data.empty: continue
             
-            # 🚨 終極修復機制：防止 Yahoo Finance 產生重複或空值資料 🚨
             data = data[~data.index.duplicated(keep='last')]
                 
             try:
                 df_c = data["Close"].round(2)
-                # 強制把 NaN 的還原價與開高低，用真實收盤價補滿，杜絕陣列長度不一造成的 KeyError
                 df_ac = data["Adj Close"].fillna(df_c)
                 df_o = data["Open"].fillna(df_c).round(2)
                 df_h = data["High"].fillna(df_c).round(2)
@@ -341,7 +337,6 @@ def run_strategy_backtest(
                     c_series = df_c[ticker].dropna()
                     if len(c_series) == 0: continue
                     
-                    # 確保所有陣列完美對齊，再也不會錯位
                     o_series = df_o[ticker].reindex(c_series.index).fillna(c_series)
                     v_series = df_v[ticker].reindex(c_series.index).fillna(0)
                     l_series = df_l[ticker].reindex(c_series.index).fillna(c_series)
@@ -535,7 +530,8 @@ def run_strategy_backtest(
                         results.append(record)
                 except: continue
         except: pass
-        progress = (i + 1) / total_batches
+        # 🐛 致命修復點：統一進度條變數名稱
+        current_progress = (i + 1) / total_batches
         progress_bar.progress(current_progress, text=f"深度回測中 (修補空缺歷史中)...({int(current_progress*100)}%)")
         time.sleep(random.uniform(0.8, 1.5))
         gc.collect() 
@@ -737,7 +733,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
         
     res_df = pd.DataFrame(raw_data_list)
     if not res_df.empty:
-        res_df = res_df.drop_duplicates(subset=['代號'], keep='last')
+        res_df = res_df.drop_duplicates(subset=['完整代號'], keep='last')
     return res_df
 
 def plot_stock_chart(ticker, name, strategy_mode=""):
@@ -949,9 +945,8 @@ with st.sidebar:
             st.write(f"**🕒 系統時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
             st.markdown("---")
             st.markdown("""
-                ### Ver 2.9d (回測精準修復版)
-                * **資料空值免疫**：偵測到 Yahoo Finance 近期對於台灣股市的 Adj Close 與 Volume 經常回傳遺失值 (NaN)。系統現在會自動以真實收盤價補滿缺口，保證底層 Pandas 陣列長度 100% 吻合，徹底消滅導致回測報表為 0 的 `KeyError` 崩潰問題。
-                * **時間序列對齊**：技術指標 KD 的索引與真實 K 棒索引實行嚴格的聯集對齊 (.reindex/.fillna)，保證每一根 K 棒都能無誤差查到對應的技術指標，回測掃描無死角。
+                ### Ver 2.9e (修復回測當機版)
+                * **抓蟲修復**：修正 `run_strategy_backtest` 迴圈底部的進度條變數名稱錯誤 (`NameError`)，徹底解決按下回測後系統當機報錯的狀況。
                 """)
         elif log_pwd != "":
             st.error("密碼錯誤")
