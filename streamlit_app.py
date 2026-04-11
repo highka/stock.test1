@@ -12,7 +12,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver 3.0 (穩定實戰終極版)"
+VER = "ver 3.1 (回測引擎完全修復版)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -99,7 +99,6 @@ def _is_black_engulf_red(prev_open, prev_close, curr_open, curr_close):
     curr_is_black = curr_close < curr_open
     return prev_is_red and curr_is_black and (curr_open >= prev_close) and (curr_close <= prev_open)
 
-# 🛡️ 固若金湯 (抗洗盤終極版)
 def detect_solid_defense_signal(stock_df, k_series, lookback=60):
     if len(stock_df) < 20: return False, {}
     recent_df = stock_df.tail(lookback).copy()
@@ -148,7 +147,7 @@ def detect_solid_defense_signal(stock_df, k_series, lookback=60):
         curr_c = float(recent_df.loc[curr_dt, 'Close'])
         prev_o = float(recent_df.loc[prev_dt, 'Open'])
         prev_c = float(recent_df.loc[prev_dt, 'Close'])
-        curr_k = float(k_series.get(curr_dt, 50.0)) # 安全獲取 KD
+        curr_k = float(k_series.get(curr_dt, 50.0))
         
         if _is_red_engulf_black(prev_o, prev_c, curr_o, curr_c) and curr_k > 20:
             engulf_confirmed = True
@@ -238,7 +237,6 @@ def run_strategy_backtest(
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 捨棄 Adj Close，完全用穩定真實價格運算
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
             if data.empty: 
                 time.sleep(5)
@@ -274,6 +272,9 @@ def run_strategy_backtest(
                     v_series = df_v[ticker].reindex(c_series.index).fillna(0)
                     l_series = df_l[ticker].reindex(c_series.index).fillna(c_series)
                     h_series = df_h[ticker].reindex(c_series.index).fillna(c_series)
+                    
+                    # 🐛 致命修復：補回均線變數，避免系統引發 NameError 無情略過所有股票！
+                    ma200_series = ma200_df[ticker].reindex(c_series.index).fillna(0)
 
                     stock_info = stock_dict.get(ticker, {})
                     stock_name = stock_info.get("name", ticker)
@@ -284,7 +285,6 @@ def run_strategy_backtest(
                         "Open": o_series, "Close": c_series, "High": h_series, "Low": l_series
                     }).dropna()
 
-                    # 統一使用真實驗證價格計算 KD，不依賴會報錯的還原價
                     k_full, d_full = calculate_kd_series(full_ohlc)
 
                     for date in scan_window:
@@ -294,7 +294,7 @@ def run_strategy_backtest(
 
                         close_p = float(c_series.iloc[idx])
                         vol = float(v_series.iloc[idx])
-                        ma200_val = float(ma200_series.iloc[idx]) if not pd.isna(ma200_series.iloc[idx]) else 0.0
+                        ma200_val = float(ma200_series.iloc[idx])
 
                         if ma200_val == 0 or vol < (min_vol_threshold * 1000): continue
 
@@ -446,13 +446,12 @@ def run_strategy_backtest(
                 except: continue
         except: pass
         current_progress = (i + 1) / total_batches
-        progress_bar.progress(current_progress, text=f"穩定回測中 (排除 Yahoo 空值地雷)...({int(current_progress*100)}%)")
+        progress_bar.progress(current_progress, text=f"穩定回測中 (排除系統地雷)...({int(current_progress*100)}%)")
         time.sleep(0.5)
         gc.collect() 
         
     res_df = pd.DataFrame(results)
-    if not res_df.empty:
-        res_df = res_df.drop_duplicates(subset=['代號'], keep='last')
+    # 🎯 回測報表解除去重：讓歷史上的所有發動點都完整呈現，方便評估真實勝率！
     return res_df
 
 def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
@@ -494,10 +493,10 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
             if not data.empty:
                 data = data[~data.index.duplicated(keep='last')]
                 try:
-                    df_o = data["Open"].round(2)
                     df_c = data["Close"].round(2)
-                    df_h = data["High"].round(2)
-                    df_l = data["Low"].round(2)
+                    df_o = data["Open"].fillna(df_c).round(2)
+                    df_h = data["High"].fillna(df_c).round(2)
+                    df_l = data["Low"].fillna(df_c).round(2)
                     df_v = data["Volume"].fillna(0)
                 except KeyError: continue
 
@@ -553,7 +552,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
                         stock_df = pd.DataFrame({
                             "Open": o_series, "Close": c_series, "High": h_series, "Low": l_series
                         }).dropna()
-                        
+
                         k_full, d_full = calculate_kd_series(stock_df)
                         k_val = float(k_full.iloc[-1]) if not k_full.empty else 0.0
                         d_val = float(d_full.iloc[-1]) if not d_full.empty else 0.0
@@ -631,6 +630,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
         gc.collect() 
         
     res_df = pd.DataFrame(raw_data_list)
+    # 🎯 日常篩選去重：一檔股票只顯示最新資料，版面極度乾淨！
     if not res_df.empty:
         res_df = res_df.drop_duplicates(subset=['完整代號'], keep='last')
     return res_df
@@ -839,9 +839,9 @@ with st.sidebar:
             st.write(f"**🕒 系統時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
             st.markdown("---")
             st.markdown("""
-                ### Ver 3.0 (穩定實戰終極版)
-                * **拔除不穩定因子**：全面捨棄近期極度不穩定的 Yahoo `Adj Close` 欄位。所有的型態辨識與 KD 技術指標計算，一律回歸「未還原之真實收盤價」，100% 杜絕因 API 缺漏造成的系統報錯與漏單。
-                * **資料長度對齊防禦**：底層改寫迴圈結構，強制容錯處理任何陣列缺漏，為系統上了最堅固的抗雷裝甲，無論 Yahoo 怎麼壞，回測與選股都能順利產出戰報！
+                ### Ver 3.1 (回測引擎完全修復版)
+                * **致命 Bug 修復**：補回 `ma200_series` 生命線宣告。徹底解決上一版因為變數漏寫而引發 NameError，導致回測系統默默跳過全台股 1800 檔股票的崩潰問題。
+                * **分流去重機制**：日常看盤啟動「絕對去重」，保證一檔股票只出現一次；策略回測則「解除去重」，完整保留過去 90 天內所有的歷史發動點，以便精準計算真實勝率。
                 """)
         elif log_pwd != "":
             st.error("密碼錯誤")
@@ -853,6 +853,8 @@ def format_price(val):
 
 if st.session_state["master_df"] is not None:
     df = st.session_state["master_df"].copy()
+    
+    # 🛡️ 只有日常篩選才去重，回測歷史不去重
     df = df.drop_duplicates(subset=['完整代號'], keep='last')
     
     if "生命線" not in df.columns:
