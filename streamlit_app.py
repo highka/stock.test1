@@ -4,16 +4,19 @@ import pandas as pd
 import twstock
 import time
 import random
-import gc  # 引入垃圾回收機制
-from datetime import datetime, timedelta
+import gc
+from datetime import datetime, timedelta, timezone
 import plotly.graph_objects as go
 import os
 import uuid
 import csv
 
-# --- 1. 網頁設定 ---
-VER = "ver 3.1 (回測引擎完全修復版)"
+# --- 1. 網頁設定 & 時區設定 ---
+VER = "ver 3.2 (300天實戰淬鍊版)"
 st.set_page_config(page_title=f"✨ 黑嚕嚕-旗鼓相當({VER})", layout="wide")
+
+# 強制設定台灣時區 (UTC+8)
+TW_TZ = timezone(timedelta(hours=8))
 
 # --- 流量紀錄與後台功能 ---
 LOG_FILE = "traffic_log.csv"
@@ -37,7 +40,7 @@ def log_traffic():
         st.session_state["has_logged"] = False
 
     if not st.session_state["has_logged"]:
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        current_time = datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M:%S")
         user_ip = get_remote_ip()
         session_id = st.session_state["session_id"]
         file_exists = os.path.exists(LOG_FILE)
@@ -237,10 +240,11 @@ def run_strategy_backtest(
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
+            # 🚀 升級：下載過去 3 年的歷史資料，保證算出最精準的均線與型態
+            data = yf.download(batch, period="3y", interval="1d", progress=False, auto_adjust=False, threads=False)
             if data.empty: 
                 time.sleep(5)
-                data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
+                data = yf.download(batch, period="3y", interval="1d", progress=False, auto_adjust=False, threads=False)
                 if data.empty: continue
             
             data = data[~data.index.duplicated(keep='last')]
@@ -261,7 +265,6 @@ def run_strategy_backtest(
                 df_v = df_v.to_frame(name=batch[0])
 
             ma200_df = df_c.rolling(window=200).mean().round(2)
-            scan_window = df_c.index[-90:]
 
             for ticker in df_c.columns:
                 try:
@@ -273,7 +276,6 @@ def run_strategy_backtest(
                     l_series = df_l[ticker].reindex(c_series.index).fillna(c_series)
                     h_series = df_h[ticker].reindex(c_series.index).fillna(c_series)
                     
-                    # 🐛 致命修復：補回均線變數，避免系統引發 NameError 無情略過所有股票！
                     ma200_series = ma200_df[ticker].reindex(c_series.index).fillna(0)
 
                     stock_info = stock_dict.get(ticker, {})
@@ -287,9 +289,14 @@ def run_strategy_backtest(
 
                     k_full, d_full = calculate_kd_series(full_ohlc)
 
+                    # 🚀 升級：掃描視窗改為過去 300 個交易日 (動態相容不滿 300 天的標的)
+                    scan_window = df_c.index[-300:]
+
                     for date in scan_window:
                         if date not in c_series.index: continue
                         idx = c_series.index.get_loc(date)
+                        
+                        # 只要資料有 200 天以上能算出 200MA，就允許進行回測掃描
                         if idx < 200: continue
 
                         close_p = float(c_series.iloc[idx])
@@ -446,12 +453,11 @@ def run_strategy_backtest(
                 except: continue
         except: pass
         current_progress = (i + 1) / total_batches
-        progress_bar.progress(current_progress, text=f"穩定回測中 (排除系統地雷)...({int(current_progress*100)}%)")
+        progress_bar.progress(current_progress, text=f"300日深度回測中 (跨越牛熊市)...({int(current_progress*100)}%)")
         time.sleep(0.5)
         gc.collect() 
         
     res_df = pd.DataFrame(results)
-    # 🎯 回測報表解除去重：讓歷史上的所有發動點都完整呈現，方便評估真實勝率！
     return res_df
 
 def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
@@ -472,13 +478,14 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
+            # 🚀 同步升級 3年 資料源，確保日常篩選與回測的均線數值絕對一致
+            data = yf.download(batch, period="3y", interval="1d", progress=False, auto_adjust=False, threads=False)
             
             msg = f"Batch {i+1}: 嘗試下載 {len(batch)} 檔"
             if data.empty:
                 msg += " ❌ (Empty Response)"
                 time.sleep(5) 
-                data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
+                data = yf.download(batch, period="3y", interval="1d", progress=False, auto_adjust=False, threads=False)
                 if data.empty:
                     msg += " -> 重試失敗"
                 else:
@@ -552,7 +559,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
                         stock_df = pd.DataFrame({
                             "Open": o_series, "Close": c_series, "High": h_series, "Low": l_series
                         }).dropna()
-
+                        
                         k_full, d_full = calculate_kd_series(stock_df)
                         k_val = float(k_full.iloc[-1]) if not k_full.empty else 0.0
                         d_val = float(d_full.iloc[-1]) if not d_full.empty else 0.0
@@ -630,7 +637,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text, debug_container=None):
         gc.collect() 
         
     res_df = pd.DataFrame(raw_data_list)
-    # 🎯 日常篩選去重：一檔股票只顯示最新資料，版面極度乾淨！
     if not res_df.empty:
         res_df = res_df.drop_duplicates(subset=['完整代號'], keep='last')
     return res_df
@@ -713,7 +719,8 @@ with st.sidebar:
             df_cache = pd.read_csv(CACHE_FILE)
             st.session_state["master_df"] = df_cache
             mod_time = os.path.getmtime(CACHE_FILE)
-            st.session_state["last_update"] = datetime.fromtimestamp(mod_time).strftime("%Y-%m-%d %H:%M:%S")
+            # 🚀 強制校正快取時間為台灣時區
+            st.session_state["last_update"] = datetime.fromtimestamp(mod_time, TW_TZ).strftime("%Y-%m-%d %H:%M:%S")
             st.success(f"⚡ 已快速載入上次資料 ({st.session_state['last_update']})")
         except Exception as e: st.error(f"讀取快取失敗: {e}")
 
@@ -730,7 +737,7 @@ with st.sidebar:
             with placeholder_emoji:
                 st.markdown("""<div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">🎁💰✨</div>
                     <style>@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }</style>
-                    <div style="text-align: center;">連線下載中 (Batch=50, Period=1Y)...</div>""", unsafe_allow_html=True)
+                    <div style="text-align: center;">連線下載中 (Batch=50, Period=3Y)...</div>""", unsafe_allow_html=True)
             
             debug_container = st.expander("🕵️ 下載詳細日誌 (Debug Log)", expanded=True)
             status_text = st.empty()
@@ -740,7 +747,8 @@ with st.sidebar:
             if not df.empty:
                 df.to_csv(CACHE_FILE, index=False)
                 st.session_state["master_df"] = df
-                st.session_state["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                # 🚀 強制校正下載完成時間為台灣時區
+                st.session_state["last_update"] = datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M:%S")
                 st.success(f"更新完成！共 {len(df)} 檔資料")
             else:
                 st.error("⛔ 連線資料庫阻擋。請查看上方日誌了解詳情。")
@@ -766,14 +774,15 @@ with st.sidebar:
     st.header("2. 即時篩選器")
     bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 5.0, 2.5, step=0.1)
     min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
-    st.subheader("策略選擇")
     
+    st.subheader("策略選擇")
+    # 🚀 介面極簡化：移除冗長括弧，改將詳細邏輯放進下方 info 區塊
     strategy_mode = st.radio("選擇篩選策略：", (
-        "🛡️ 生命線保衛戰 (反彈/支撐)", 
-        "🔥 起死回生 (Da來守住)", 
-        "🛡️ 固若金湯 (破底翻突破)", 
-        "🏹 蓄勢待發 (KD+紅吞)", 
-        "⚡ 光神腳 (紅吞+左腳KD<80)"
+        "🛡️ 生命線保衛戰", 
+        "🔥 起死回生", 
+        "🛡️ 固若金湯", 
+        "🏹 蓄勢待發", 
+        "⚡ 光神腳"
     ))
     
     st.caption("細部條件：")
@@ -782,21 +791,22 @@ with st.sidebar:
     filter_kd = False
     filter_vol_double = False
 
-    if strategy_mode == "🛡️ 生命線保衛戰 (反彈/支撐)":
+    if strategy_mode == "🛡️ 生命線保衛戰":
+        st.info("條件：尋找在生命線(200MA)附近尋求支撐或準備反彈的標的。")
         c1, c2 = st.columns(2)
         with c1: filter_trend_up = st.checkbox("生命線向上", value=False)
         with c2: filter_trend_down = st.checkbox("生命線向下", value=False)
         filter_kd = st.checkbox("KD 黃金交叉", value=False)
         filter_vol_double = st.checkbox("出量 (今日 > 昨日x1.5)", value=False)
-    elif strategy_mode == "🔥 起死回生 (Da來守住)":
-        st.info("ℹ️ 過去7日跌破，今日站回生命線。")
+    elif strategy_mode == "🔥 起死回生":
+        st.info("條件：過去7日曾跌破生命線，但今日重新強勢站回生命線。")
         filter_vol_double = st.checkbox("出量確認", value=False)
-    elif strategy_mode == "🛡️ 固若金湯 (破底翻突破)":
-        st.info("條件：定義近期高點為箱頂，並往前找出最低 Daa 基準。回測期間無懼下影線假跌破，只要收盤價守住 Daa，且出現「紅吞黑+KD>20」，今日以實體紅K強勢突破箱頂即為買點。")
-    elif strategy_mode == "🏹 蓄勢待發 (KD+紅吞)":
-        st.info("條件：K<20後金叉，金叉後3日內發動(K>=20, 紅吞黑)。")
-    elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)":
-        st.info("條件：左腳(K<20)；頸線(波段高點) K<80；紅吞黑發動。")
+    elif strategy_mode == "🛡️ 固若金湯":
+        st.info("條件：破底翻突破。找尋近期高點為箱頂與左腳最低 Daa。只要收盤價死守 Daa 不破，且出現「紅吞黑+KD>20」，今日以實體紅K強勢突破箱頂即為買點。")
+    elif strategy_mode == "🏹 蓄勢待發":
+        st.info("條件：KD指標 K<20 落底後發生黃金交叉，並在金叉後3日內發動攻擊(K>=20, 出現紅吞黑)。")
+    elif strategy_mode == "⚡ 光神腳":
+        st.info("條件：W底型態。左腳跌破 K<20；隨後反彈的頸線(波段高點) K<80不過熱；今日再度出現紅吞黑發動。")
 
     st.divider()
     
@@ -813,10 +823,10 @@ with st.sidebar:
         st.info("阿吉正在調閱歷史檔案... ⏳")
         stock_dict = get_stock_list()
         bt_progress = st.progress(0, text="回測中...")
-        use_treasure_param = (strategy_mode == "🔥 起死回生 (Da來守住)")
-        use_solid_defense_param = (strategy_mode == "🛡️ 固若金湯 (破底翻突破)")
-        use_legkick_param = (strategy_mode == "🏹 蓄勢待發 (KD+紅吞)")
-        use_w_bottom_param = (strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)")
+        use_treasure_param = (strategy_mode == "🔥 起死回生")
+        use_solid_defense_param = (strategy_mode == "🛡️ 固若金湯")
+        use_legkick_param = (strategy_mode == "🏹 蓄勢待發")
+        use_w_bottom_param = (strategy_mode == "⚡ 光神腳")
 
         bt_df = run_strategy_backtest(
             stock_dict, bt_progress, mode=strategy_mode,
@@ -836,12 +846,15 @@ with st.sidebar:
     with st.expander("📅 系統開發日誌"):
         log_pwd = st.text_input("請輸入密碼以查看日誌", type="password", key="dev_log_pwd")
         if log_pwd == "1103":
-            st.write(f"**🕒 系統時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            # 🚀 開發日誌時間也強制校正為台灣時間
+            st.write(f"**🕒 系統時間:** {datetime.now(TW_TZ).strftime('%Y-%m-%d %H:%M')}")
             st.markdown("---")
             st.markdown("""
-                ### Ver 3.1 (回測引擎完全修復版)
-                * **致命 Bug 修復**：補回 `ma200_series` 生命線宣告。徹底解決上一版因為變數漏寫而引發 NameError，導致回測系統默默跳過全台股 1800 檔股票的崩潰問題。
-                * **分流去重機制**：日常看盤啟動「絕對去重」，保證一檔股票只出現一次；策略回測則「解除去重」，完整保留過去 90 天內所有的歷史發動點，以便精準計算真實勝率。
+                ### Ver 3.2 (300天實戰淬鍊版)
+                * **資料庫擴編**：Yahoo Finance 歷史資料下載跨度從 2 年躍升為 3 年。
+                * **深水區回測**：回測掃描天數由 90 天大幅拉長為過去 300 個交易日，徹底覆蓋台股的牛熊循環，逼出最真實的長期期望值與勝率。
+                * **動態生命線相容**：回測引擎新增容錯機制，只要股票上市超過 200 天能算出生命線，即使不滿 300 天依然可被納入掃描，確保剛滿一年的潛力新星不會被埋沒。
+                * **時區與 UI 淨化**：全面綁定 UTC+8 台灣時區，解決雲端部署時差問題；並將策略選擇按鈕極簡化，文字說明移至細部條件面板，提升看盤視野。
                 """)
         elif log_pwd != "":
             st.error("密碼錯誤")
@@ -853,8 +866,6 @@ def format_price(val):
 
 if st.session_state["master_df"] is not None:
     df = st.session_state["master_df"].copy()
-    
-    # 🛡️ 只有日常篩選才去重，回測歷史不去重
     df = df.drop_duplicates(subset=['完整代號'], keep='last')
     
     if "生命線" not in df.columns:
@@ -863,13 +874,13 @@ if st.session_state["master_df"] is not None:
 
     df = df[df["成交量"] >= (min_vol_input * 1000)]
 
-    if strategy_mode == "🔥 起死回生 (Da來守住)":
+    if strategy_mode == "🔥 起死回生":
         df = df[df["浴火重生"] == True]
-    elif strategy_mode == "🛡️ 固若金湯 (破底翻突破)":
+    elif strategy_mode == "🛡️ 固若金湯":
         df = df[df["固若金湯"] == True] if "固若金湯" in df.columns else df.iloc[0:0]
-    elif strategy_mode == "🏹 蓄勢待發 (KD+紅吞)":
+    elif strategy_mode == "🏹 蓄勢待發":
         df = df[df["蓄勢待發"] == True] if "蓄勢待發" in df.columns else df.iloc[0:0]
-    elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)":
+    elif strategy_mode == "⚡ 光神腳":
         df = df[df["光神腳"] == True] if "光神腳" in df.columns else df.iloc[0:0]
     else:
         df = df[df["abs_bias"] <= bias_threshold]
@@ -889,7 +900,7 @@ if st.session_state["master_df"] is not None:
         df["選股標籤"] = df["代號"].astype(str) + " " + df["名稱"].astype(str)
 
         fixed_display_cols = ["代號", "名稱", "產業", "收盤價", "生命線", "乖離率(%)", "位置", "KD值", "成交量(張)"]
-        if strategy_mode == "🛡️ 固若金湯 (破底翻突破)":
+        if strategy_mode == "🛡️ 固若金湯":
             fixed_display_cols = ["代號", "名稱", "產業", "收盤價", "箱頂", "守住日期", "生命線", "KD值", "成交量(張)"]
 
         for col in fixed_display_cols:
@@ -920,7 +931,7 @@ if st.session_state["master_df"] is not None:
             
             plot_stock_chart(selected_row["完整代號"], selected_row["名稱"], strategy_mode)
 
-            if strategy_mode == "🛡️ 固若金湯 (破底翻突破)":
+            if strategy_mode == "🛡️ 固若金湯":
                 st.markdown("---")
                 st.caption("🛡️ 固若金湯策略詳細數據:")
                 c1, c2, c3 = st.columns(3)
@@ -930,7 +941,7 @@ if st.session_state["master_df"] is not None:
                 with c2: st.warning(f"🛡️ 右腳守住確認日\n\n**{selected_row.get('守住日期', '-')}**")
                 with c3: st.success(f"🚀 突破箱頂價位\n\n**{box_top_str}**")
 
-            elif strategy_mode == "🏹 蓄勢待發 (KD+紅吞)":
+            elif strategy_mode == "🏹 蓄勢待發":
                 st.markdown("---")
                 st.caption("🏹 蓄勢待發策略詳細數據:")
                 k_col1, k_col2, k_col3 = st.columns(3)
@@ -939,7 +950,7 @@ if st.session_state["master_df"] is not None:
                 with k_col1: st.info(f"📉 KD落底日\n\n**{low_date}**")
                 with k_col3: st.success(f"🚀 發動攻擊日\n\n**{kick_date}**")
             
-            elif strategy_mode == "⚡ 光神腳 (紅吞+左腳KD<80)":
+            elif strategy_mode == "⚡ 光神腳":
                 st.markdown("---")
                 st.caption("⚡ 光神腳策略數據:")
                 w_col1, w_col2 = st.columns(2)
